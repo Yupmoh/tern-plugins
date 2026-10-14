@@ -45,14 +45,27 @@ Optional: PR badges need the [GitHub CLI](https://cli.github.com) (`gh`) signed 
 
 Right-click menus also cover rename, lock, tab colors, splits, moving panes to other tabs or workspaces, interrupting or stopping agents, Copy Path and Reveal in Finder.
 
+### Monorepos and submodules
+
+Open a workspace at the root of a monorepo and Kai also finds the git repos inside it (up to 4 folders deep, skipping `node_modules`, `build` and the like), whether they are independent clones or submodules.
+
+- The card's counts add up every repo.
+- **Changes** shows one group per repo with changes, then one line naming the clean ones. Nested repo folders no longer appear as untracked files in the root.
+- **Refs** shows one group per repo, the root open and the rest folded. Checkout runs in the repo the branch belongs to.
+- Submodules are tagged `submodule`. In the parent, a submodule whose checked-out commit moved shows as one row marked "submodule".
+
+### Several hosts
+
+Workspaces sit under one foldable header per machine ("This Mac", then each remote), with a connection dot, latency and a session count. Click a host's name to switch to it, `+` opens Tern's Add remote host dialog, and right-click offers Switch, New Session on Host, Add and Disconnect. The sidebar works in remote tabs too. A remote workspace's Files, Changes and Refs buttons open Tern's own panels on that machine, since its folders aren't on this disk.
+
 ## How it works
 
 - `window.luau` holds the model (sessions, tabs, panes, agent state, git, files), the per-tab panel, clicks, menus and commands. `view.luau` turns the model into Tern-native nodes. `styles.css` only sets spacing and shading, scoped to `kai.*` roles.
 - Tern has no window-level sidebar API, so each tab gets its own canvas pane as a full-height left column. A tab that is already split is rebuilt around it, keeping its shape and ratios. Only the visible tab's panel redraws; the others catch up when shown.
-- Tern gives each callback a 50 ms budget. Drawing runs in its own timer callback, git reads are asynchronous, and folder listings run in the background with a 10 s cache.
+- Tern gives each callback a 50 ms budget. Drawing runs in its own timer callback, git reads are asynchronous, and folder listings run in the background with a 10 s cache. If a stall (sleep, heavy load) makes Tern disable the plugin's timers, Kai notices and keeps working through process callbacks until the next reload.
 - Fold state, views, workspace order, icons, colors, the Ice Box, unseen marks and settings live in Tern's plugin storage.
 
-**Limits:** Tern canvases only receive clicks, so reordering is pick-then-place rather than drag. The thin scrollbar style applies to all canvases, so other plugins' canvases get it too.
+**Limits:** Tern canvases only receive clicks, so reordering is pick-then-place rather than drag. The thin scrollbar style applies to all canvases, so other plugins' canvases get it too. Remote workspaces show agent state but no change counts, PR or ticket badges on the card.
 
 ## Developing
 

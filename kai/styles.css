@@ -275,6 +275,35 @@ row[data-role='kai.tile'], [data-role='kai.tile'].sf-row {
   align-items: center;
   gap: 8px;
 }
+/* A machine: a flat foldable label (the view headings' small caps) over its workspace cards. */
+[data-role='kai.root'] [data-role='kai.host'] > .sf-section-head {
+  min-height: 0;
+  padding: 2px 6px 2px 2px;
+}
+[data-role='kai.host'] > .sf-section-body {
+  box-shadow: none;
+  margin-left: 0;
+  padding-left: 0;
+  padding-top: 8px;
+}
+[data-role='kai.hostBody'] {
+  gap: 20px;
+}
+[data-role='kai.hostHead'] {
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8em;
+  letter-spacing: 0.06em;
+}
+[data-role='kai.hostDot'] {
+  transform: scale(0.6);
+}
+[data-role='kai.hostName'] {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
 [data-role='kai.ice'],
 [data-role='kai.iceOn'] {
   align-items: center;

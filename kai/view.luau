@@ -26,6 +26,8 @@ local M = {
 	sound = "Turn Sounds On", noSound = "Turn Sounds Off", linear = "Set Linear Workspace…",
 	stage = "Stage", unstage = "Unstage", checkout = "Checkout", openFile = "Open",
 	newWs = "New Workspace…", expandAll = "Expand All Workspaces", collapseAll = "Collapse All Workspaces",
+	addHost = "Add Remote Host…", switchHost = "Switch to Host", newOnHost = "New Session on Host…",
+	disconnectHost = "Disconnect Host",
 }
 View.M = M
 
@@ -108,6 +110,8 @@ end
 
 -- The move being placed (set per render), so rows can dim and drop slots can appear.
 local mv = nil
+-- Path of the section workspaces sit in: the root, or their host's section when hosts are shown.
+local parent = "main.kai."
 
 -- Tern's own move glyph, shown on hover; clicking it picks the row up.
 local function grip(value, what)
@@ -219,7 +223,7 @@ local function tabSection(workspace, wkey, tab)
 	local moved = mv and mv.kind == "tab" and mv.id == tab.id
 	return ui.node("section", {
 		key = key,
-		head = "main.kai." .. wkey .. "." .. key .. ".head", collapsible = true, collapsed = not tab.open,
+		head = parent .. wkey .. "." .. key .. ".head", collapsible = true, collapsed = not tab.open,
 		role = "kai.tab", mark = if moved then "drop" else nil,
 		actions = { menu = View.tabMenu(workspace, tab) },
 	}, {
@@ -378,10 +382,13 @@ local function changeRows(root, files, side, menu)
 		local letter = LETTER[f[side] or ""] or "M"
 		local name = f.path:match("([^/]+)$") or f.path
 		local dir = f.path:match("^(.*)/[^/]+$")
+		-- A submodule row is its pointer: the parent records a different commit than it had.
+		if f.submodule then dir = "submodule" end
 		table.insert(rows, ui.node("item", {
-			key = "f" .. hex(root .. "/" .. f.path), label = name, detail = dir, icon = "file", role = "kai.fileRow",
+			key = "f" .. hex(root .. "/" .. f.path), label = name, detail = dir,
+			icon = if f.submodule then "folder" else "file", role = "kai.fileRow",
 			value = { ui.span(letter, LETTER_TONE[letter] or "muted") },
-			title = f.path,
+			title = if f.submodule then f.path .. "\nSubmodule: its checked-out commit differs from the one recorded here" else f.path,
 			actions = { click = "file=" .. hex(root .. "/" .. f.path), menu = { menu, M.openFile, M.copyPath } },
 		}))
 	end
@@ -392,37 +399,33 @@ local function heading(key, label, n)
 	return ui.node("text", { key = key, role = "kai.heading", spans = { ui.span(string.upper(label), "muted"), ui.span("  " .. tostring(n), "muted") } })
 end
 
--- Tern's Files, Changes and Refs panels, redrawn from the same data with Tern's own parts.
-local function viewBody(workspace)
-	if workspace.view == "files" then
-		if not workspace.files then return { note("loading", "Loading…") } end
-		if #workspace.files == 0 then return { note("empty", "Empty folder") } end
-		local rows = fileRows(workspace.files)
-		if workspace.filesMore then table.insert(rows, note("more", "More files not shown")) end
-		return { ui.node("col", { key = "files", role = "kai.list" }, rows) }
+-- Unstaged (conflicts first) and staged files of one repo.
+local function statusBlock(root, st)
+	local unstaged = {}
+	for _, f in st.conflicts do table.insert(unstaged, f) end
+	for _, f in st.unstaged do table.insert(unstaged, f) end
+	local out = { heading("uh", "Unstaged", #unstaged) }
+	if #unstaged > 0 then
+		table.insert(out, ui.node("col", { key = "u", role = "kai.list" }, changeRows(root, unstaged, "unstaged", M.stage)))
 	end
-	if not workspace.repo then return { note("norepo", "Not a git repository") } end
-	if workspace.view == "changes" then
-		local st = workspace.status
-		if not st then return { note("loading", "Loading…") } end
-		local unstaged = {}
-		for _, f in st.conflicts do table.insert(unstaged, f) end
-		for _, f in st.unstaged do table.insert(unstaged, f) end
-		local out = { heading("uh", "Unstaged", #unstaged) }
-		if #unstaged > 0 then
-			table.insert(out, ui.node("col", { key = "u", role = "kai.list" }, changeRows(workspace.root, unstaged, "unstaged", M.stage)))
-		end
-		table.insert(out, heading("sh", "Staged", #st.staged))
-		if #st.staged > 0 then
-			table.insert(out, ui.node("col", { key = "s", role = "kai.list" }, changeRows(workspace.root, st.staged, "staged", M.unstage)))
-		else
-			table.insert(out, note("snone", "Stage files to include them in the next commit"))
-		end
-		return out
+	table.insert(out, heading("sh", "Staged", #st.staged))
+	if #st.staged > 0 then
+		table.insert(out, ui.node("col", { key = "s", role = "kai.list" }, changeRows(root, st.staged, "staged", M.unstage)))
+	else
+		table.insert(out, note("snone", "Stage files to include them in the next commit"))
 	end
-	-- refs
-	local branches = workspace.branches
-	if not branches then return { note("loading", "Loading…") } end
+	return out
+end
+
+local function drift(ahead, behind)
+	local bits = {}
+	if (ahead or 0) > 0 then table.insert(bits, "↑" .. tostring(ahead)) end
+	if (behind or 0) > 0 then table.insert(bits, "↓" .. tostring(behind)) end
+	return if #bits > 0 then table.concat(bits, " ") else nil
+end
+
+-- Local branches, then remote ones under their remote, of one repo.
+local function refsBlock(branches)
 	local locals, remotes = {}, {}
 	for _, b in branches do
 		if b.remote then
@@ -433,13 +436,10 @@ local function viewBody(workspace)
 		end
 	end
 	local function branchRow(b, label)
-		local drift = {}
-		if (b.ahead or 0) > 0 then table.insert(drift, "↑" .. tostring(b.ahead)) end
-		if (b.behind or 0) > 0 then table.insert(drift, "↓" .. tostring(b.behind)) end
 		return ui.node("item", {
 			key = "b" .. hex(b.name), label = label or b.name,
 			icon = if b.current then "check" else "branch", tone = if b.current then "success" else nil,
-			value = if #drift > 0 then table.concat(drift, " ") else nil,
+			value = drift(b.ahead, b.behind),
 			role = "kai.fileRow", title = b.name .. (if b.upstream then "\n→ " .. b.upstream else ""),
 			actions = { menu = if b.current then nil else { M.checkout } },
 		})
@@ -463,6 +463,75 @@ local function viewBody(workspace)
 		end
 	end
 	return out
+end
+
+-- One repo of a monorepo: a foldable section headed by its path, branch and count or drift.
+local function repoSection(wkey, group, value, collapsed, body)
+	local key = "g" .. hex(group.root)
+	local spans = { ui.span(group.name) }
+	if group.submodule then table.insert(spans, ui.span("  submodule", "muted")) end
+	if group.branch then table.insert(spans, ui.span("  " .. group.branch, "muted")) end
+	return ui.node("section", {
+		key = key, head = parent .. wkey .. "." .. key .. ".head", collapsible = true, collapsed = collapsed,
+		role = "kai.tab", title = group.root,
+	}, {
+		ui.node("row", { key = "head", role = "kai.tabHead" }, {
+			ui.node("icon", { key = "ic", name = "folder", tone = "muted" }),
+			ui.node("text", { key = "name", spans = spans, grow = 1 }),
+			value or ui.node("text", { key = "v", text = "" }),
+		}),
+		ui.node("col", { key = "l" }, body),
+	})
+end
+
+-- Several repos (a monorepo): Changes lists those with changes and names the clean ones;
+-- Refs lists every repo, the workspace's own open and the nested ones folded.
+local function reposBody(workspace, wkey)
+	local out = {}
+	if workspace.view == "changes" then
+		local clean = {}
+		for _, g in workspace.repos do
+			if not g.status then
+				table.insert(out, repoSection(wkey, g, nil, false, { note("loading", "Loading…") }))
+			elseif g.count == 0 then
+				table.insert(clean, g.name)
+			else
+				local count = ui.node("text", { key = "v", role = "kai.viewCount", tone = "warning", text = tostring(g.count) })
+				table.insert(out, repoSection(wkey, g, count, false, statusBlock(g.root, g.status)))
+			end
+		end
+		if #clean > 0 then
+			table.insert(out, ui.node("text", { key = "clean", role = "kai.note", title = table.concat(clean, "\n"),
+				spans = { ui.span(plural(#clean, "clean repo") .. ": " .. table.concat(clean, ", "), "muted") } }))
+		end
+		return out
+	end
+	for i, g in workspace.repos do
+		local d = drift(g.ahead, g.behind)
+		local value = d and ui.node("text", { key = "v", role = "kai.viewCount", tone = "info", text = d }) or nil
+		local body = if g.branches then refsBlock(g.branches) else { note("loading", "Loading…") }
+		table.insert(out, repoSection(wkey, g, value, i > 1, body))
+	end
+	return out
+end
+
+-- Tern's Files, Changes and Refs panels, redrawn from the same data with Tern's own parts.
+local function viewBody(workspace, wkey)
+	if workspace.view == "files" then
+		if not workspace.files then return { note("loading", "Loading…") } end
+		if #workspace.files == 0 then return { note("empty", "Empty folder") } end
+		local rows = fileRows(workspace.files)
+		if workspace.filesMore then table.insert(rows, note("more", "More files not shown")) end
+		return { ui.node("col", { key = "files", role = "kai.list" }, rows) }
+	end
+	if not workspace.repo then return { note("norepo", "Not a git repository") } end
+	if workspace.repos then return reposBody(workspace, wkey) end
+	if workspace.view == "changes" then
+		if not workspace.status then return { note("loading", "Loading…") } end
+		return statusBlock(workspace.root, workspace.status)
+	end
+	if not workspace.branches then return { note("loading", "Loading…") } end
+	return refsBlock(workspace.branches)
 end
 
 local function workspaceSection(workspace)
@@ -492,17 +561,61 @@ local function workspaceSection(workspace)
 	if slotAt(src, #workspace.tabs + 1) then table.insert(run, dropSlot("dend", 0)) end
 	flush()
 	if #body == 0 then table.insert(body, ui.text({ ui.span("No tabs", "muted") })) end
-	if workspace.view ~= "agents" then body = viewBody(workspace) end
+	if workspace.view ~= "agents" then body = viewBody(workspace, key) end
 	table.insert(body, 1, viewBar(workspace))
 	table.insert(body, 1, workspaceHead(workspace))
 
 	local moved = mv and mv.kind == "ws" and mv.id == workspace.id
 	return ui.node("section", {
 		key = key,
-		head = "main.kai." .. key .. ".head", collapsible = true, collapsed = not workspace.open,
+		head = parent .. key .. ".head", collapsible = true, collapsed = not workspace.open,
 		role = "kai.workspace", mark = if moved then "drop" else nil,
 		actions = { menu = View.workspaceMenu(workspace) },
 	}, body)
+end
+
+local HOST_STATE = {
+	connected = { tone = "success", text = nil },
+	connecting = { tone = "warning", text = "connecting" },
+	reconnecting = { tone = "warning", text = "reconnecting" },
+	stalled = { tone = "warning", text = "stalled" },
+	verify = { tone = "warning", text = "verify key" },
+	failed = { tone = "error", text = "failed" },
+}
+
+
+-- A machine: a foldable section headed like the view labels (state dot, name, "This Mac" locally,
+-- latency or link state, workspace count, + to add a host), holding its workspaces.
+local function hostSection(h, body)
+	local look = HOST_STATE[h.state] or HOST_STATE.connecting
+	local label = if h.remote then h.name else "This Mac"
+	local spans = { ui.span(string.upper(label), if h.current then nil else "muted") }
+	if look.text then
+		table.insert(spans, ui.span(" · " .. look.text, look.tone))
+	elseif h.remote and h.rtt then
+		table.insert(spans, ui.span(" · " .. tostring(math.floor(h.rtt + 0.5)) .. " ms", "muted"))
+	end
+	local menu = { M.switchHost, M.newOnHost, M.addHost }
+	if h.remote then table.insert(menu, M.disconnectHost) end
+	local key = "h" .. tostring(h.id)
+	if #body == 0 then table.insert(body, note("none", "No sessions")) end
+	return ui.node("section", {
+		key = key, head = "main.kai." .. key .. ".head", collapsible = true, collapsed = false,
+		role = "kai.host", actions = { menu = menu },
+	}, {
+		ui.node("row", {
+			key = "head", role = "kai.hostHead",
+			title = h.name .. (if h.remote then " (remote)" else " (this Mac)") .. (if h.error then "\n" .. h.error else ""),
+		}, {
+			ui.node("text", { key = "dot", spans = { ui.span("●", look.tone) }, role = "kai.hostDot" }),
+			ui.node("text", { key = "name", spans = spans, grow = 1, role = "kai.hostName",
+				actions = { click = "host=" .. tostring(h.id) } }),
+			ui.node("text", { key = "n", text = tostring(h.count), tone = "muted" }),
+			ui.node("icon", { key = "add", name = "plus", tone = "muted", title = "Add remote host", aria = "Add remote host",
+				actions = { click = "addhost" } }),
+		}),
+		ui.node("col", { key = "l", role = "kai.hostBody" }, body),
+	})
 end
 
 function View.render(model)
@@ -537,9 +650,23 @@ function View.render(model)
 		}))
 	end
 	local src = mv and mv.kind == "ws" and indexOf(model.workspaces, mv.id) or nil
+	-- Workspaces with their drop slots, into the host section they belong to (or the root).
+	local byHost, loose = {}, children
 	for i, workspace in ipairs(model.workspaces) do
-		if slotAt(src, i) then table.insert(children, dropSlot("d" .. tostring(workspace.id), workspace.id)) end
-		table.insert(children, workspaceSection(workspace))
+		local into = loose
+		if model.hosts and workspace.host ~= nil then
+			byHost[workspace.host] = byHost[workspace.host] or {}
+			into = byHost[workspace.host]
+		end
+		parent = if into == loose then "main.kai." else "main.kai.h" .. tostring(workspace.host) .. ".l."
+		if slotAt(src, i) then table.insert(into, dropSlot("d" .. tostring(workspace.id), workspace.id)) end
+		table.insert(into, workspaceSection(workspace))
+	end
+	parent = "main.kai."
+	if model.hosts then
+		for _, h in model.hosts do
+			table.insert(children, hostSection(h, byHost[h.id] or {}))
+		end
 	end
 	if slotAt(src, #model.workspaces + 1) then table.insert(children, dropSlot("dend", 0)) end
 	return ui.node("col", { key = "kai", role = "kai.root" }, children)

@@ -27,6 +27,18 @@ local function localHost(cx)
 	return cx.hosts:current().kind == "local"
 end
 
+-- Whether a session lives on a remote host.
+local function isRemote(cx, sessionId)
+	local hostId
+	for _, s in cx.sessions:list() do
+		if s.id == sessionId then hostId = s.host end
+	end
+	for _, h in cx.hosts:list() do
+		if h.id == hostId then return h.kind == "remote" end
+	end
+	return false
+end
+
 -- Agent CLIs recognised in plain terminals, by program name.
 local AGENTS = {
 	omp = true, pi = true, claude = true, codex = true, opencode = true, gemini = true,
@@ -107,6 +119,33 @@ local function ours(cx)
 end
 
 local redraw -- defined below
+local restartTick -- defined below
+
+-- One overrun (a sleep/wake or load stall is enough) makes Tern disable every timer of this plugin
+-- until reload, and tern.timer keeps returning as if nothing happened. The 750 ms tick is the canary:
+-- an event arriving while it is long overdue means timers are dead, and from then on deferred work
+-- runs in process callbacks, a separate hook.
+local lastTick = tern.now()
+local timersDead = false
+
+-- True when this call noticed the timers died.
+local function checkTimers()
+	if timersDead or tern.now() - lastTick < 3000 then return false end
+	timersDead = true
+	tern.log.warn("kai: Tern disabled this plugin's timers after a budget overrun; deferring through processes until reload")
+	restartTick()
+	return true
+end
+
+local function later(ms, fn)
+	checkTimers()
+	if timersDead then
+		tern.process.run({ "/bin/sleep", string.format("%.3f", ms / 1000) }, { timeout_ms = ms + 5000 },
+			function(_result, cx) fn(cx) end)
+	else
+		tern.timer(ms, fn)
+	end
+end
 
 local function refreshGit(folder, force)
 	local entry = git[folder]
@@ -114,7 +153,7 @@ local function refreshGit(folder, force)
 	entry = entry or {}
 	entry.inflight, entry.at = true, tern.now()
 	git[folder] = entry
-	tern.timer(0, function(cx)
+	later(0, function(cx)
 		if not cx then entry.inflight = false; return end
 		local ok = pcall(function()
 			cx.git:repo(folder):next(function(repo, err, nextCx)
@@ -167,6 +206,45 @@ local function listDir(dir)
 			end)
 		end
 		listing[dir] = { entries = entries, at = tern.now() }
+		if redraw then redraw() end
+	end)
+	return stale
+end
+
+-- Monorepos: repos nested under a workspace (independent clones or submodules), found with one
+-- `find` and cached, so a workspace opened at the root still shows every repo its agents touch.
+local nested = {} -- folder -> { repos = { absolute path }, at } or { pending = true, repos }
+local submodules = {} -- repo root -> true when its .git is a file (a submodule's gitdir pointer)
+local NESTED_TTL_MS = 60000
+local NESTED_MAX = 30
+local PRUNE = { "node_modules", ".build", "build", "dist", "target", "Library", "Temp", "obj", ".venv", "vendor", "Pods", "DerivedData" }
+
+local function nestedRepos(folder)
+	if folder == "/" or folder == tern.getenv("HOME") then return nil end
+	local hit = nested[folder]
+	if hit and (hit.pending or tern.now() - hit.at < NESTED_TTL_MS) then return hit.repos end
+	local stale = hit and hit.repos
+	nested[folder] = { pending = true, repos = stale }
+	local argv = { "/usr/bin/find", folder, "-maxdepth", "4", "(" }
+	for i, name in PRUNE do
+		if i > 1 then table.insert(argv, "-o") end
+		table.insert(argv, "-name")
+		table.insert(argv, name)
+	end
+	for _, arg in { ")", "-prune", "-o", "-name", ".git", "-print" } do table.insert(argv, arg) end
+	-- find exits non-zero on an unreadable folder; what it printed still holds.
+	tern.process.run(argv, { timeout_ms = 10000 }, function(result)
+		local repos = {}
+		for line in string.gmatch(result and result.stdout or "", "[^\n]+") do
+			local dir = line:match("^(.*)/%.git$")
+			if dir and dir ~= folder and #repos < NESTED_MAX then
+				table.insert(repos, dir)
+				-- Listing a file raises: a .git file marks a submodule (or a linked worktree).
+				submodules[dir] = not pcall(tern.fs.list, line) or nil
+			end
+		end
+		table.sort(repos)
+		nested[folder] = { repos = repos, at = tern.now() }
 		if redraw then redraw() end
 	end)
 	return stale
@@ -308,6 +386,85 @@ local function ticketOf(branch)
 	return branch and string.match(branch, "%f[%w](%u[%u%d]*%-%d+)%f[%W]")
 end
 
+-- A repo's status as its group shows it: untracked folders that are nested repos are dropped (they
+-- get groups of their own), and a submodule's pointer change is marked as such.
+local function annotate(status, root, roots)
+	local rels = {}
+	for _, r in roots do
+		if r:sub(1, #root + 1) == root .. "/" then rels[r:sub(#root + 2)] = r end
+	end
+	if next(rels) == nil then return status end
+	local function isNested(path)
+		path = path:gsub("/$", "")
+		for rel in rels do
+			if path == rel or path:sub(1, #rel + 1) == rel .. "/" then return true end
+		end
+		return false
+	end
+	local function mark(list)
+		local out = {}
+		for _, f in list do
+			if f.unstaged == "untracked" and isNested(f.path) then continue end
+			if rels[f.path] and submodules[rels[f.path]] then
+				f = table.clone(f)
+				f.submodule = true
+			end
+			table.insert(out, f)
+		end
+		return out
+	end
+	return { staged = mark(status.staged), unstaged = mark(status.unstaged), conflicts = status.conflicts }
+end
+
+local function countChanges(st)
+	local seen, n = {}, 0
+	for _, list in { st.staged, st.unstaged, st.conflicts } do
+		for _, f in list do
+			if not seen[f.path] then seen[f.path], n = true, n + 1 end
+		end
+	end
+	return n
+end
+
+-- The repos a workspace reaches: the one its folder is in, then those nested below that repo's root
+-- (or below the folder when it is in none). Status and branches ride along only for `view`.
+local function repoGroups(folder, entry, view)
+	local base = if entry and entry.repo then entry.root else folder
+	local roots, entries = {}, {}
+	if entry and entry.repo then
+		table.insert(roots, entry.root)
+		entries[entry.root] = entry
+	end
+	-- Only once the first git read answered, so the root is known before looking below it.
+	if entry and entry.repo ~= nil then
+		for _, r in (nestedRepos(base) or {}) do
+			refreshGit(r)
+			if not (git[r] and git[r].repo == false) then
+				table.insert(roots, r)
+				entries[r] = git[r]
+			end
+		end
+	end
+	local groups = {}
+	for _, r in roots do
+		local e = entries[r]
+		local g = {
+			root = r, name = if r == base then (r:match("([^/]+)$") or r) else r:sub(#base + 2),
+			count = 0, ahead = 0, behind = 0, submodule = submodules[r],
+		}
+		local st = e and e.status
+		if st then st = annotate(st, r, roots) end
+		if st then g.count = countChanges(st) end
+		for _, b in (e and e.branches or {}) do
+			if b.current then g.branch, g.ahead, g.behind = b.name, b.ahead or 0, b.behind or 0 end
+		end
+		if view == "changes" then g.status = st end
+		if view == "refs" then g.branches = e and e.branches end
+		table.insert(groups, g)
+	end
+	return groups, base
+end
+
 local function model(cx)
 	local own = ours(cx)
 	local agents = {}
@@ -325,6 +482,13 @@ local function model(cx)
 	for _, tab in cx.session:tabs() do tabsById[tab.id] = tab end
 
 	local current = cx.sessions:current()
+	-- Hosts by id, and each session's host: one header per machine once more than one is attached.
+	local hosts, hostOrder, sessionHost = {}, {}, {}
+	for _, h in cx.hosts:list() do
+		hosts[h.id] = h
+		table.insert(hostOrder, h.id)
+	end
+	for _, s in cx.sessions:list() do sessionHost[s.id] = s.host end
 	local openState = records("open")
 	local tabOpen = records("tab-open")
 	local workspaces = {}
@@ -398,40 +562,40 @@ local function model(cx)
 		local stored = openState[key]
 		workspace.open = if stored == nil then true else stored
 		workspace.gen = tonumber(tern.kv.get("gen")) or 0
-		local entry = git[folder]
-		refreshGit(folder)
-		-- The workspace's view: agents (its tabs and panes) or Tern's files, changes and refs.
-		if entry and entry.repo then
-			local st = entry.status
-			if st then
-				local seen, n = {}, 0
-				for _, list in { st.staged, st.unstaged, st.conflicts } do
-					for _, f in list do
-						if not seen[f.path] then seen[f.path], n = true, n + 1 end
-					end
-				end
-				workspace.changeCount = n
-			end
-			for _, b in (entry.branches or {}) do
-				if b.current then workspace.branch, workspace.ahead, workspace.behind = b.name, b.ahead or 0, b.behind or 0 end
-			end
-		end
-		if workspace.branch then
-			workspace.pr = prFor(workspace.root, workspace.branch)
-			workspace.ticket = ticketOf(workspace.branch)
-		end
 		workspace.iced = icebox[key] == true
 		local style = records("ws-style")[key]
 		if type(style) == "table" then workspace.icon, workspace.tone = style.icon, style.tone end
-		workspace.view = records("ws-view")[key] or "agents"
-		workspace.root = entry and entry.root or folder
-		workspace.repo = entry and entry.repo
-		if workspace.open and entry and entry.repo then
-			if workspace.view == "changes" then workspace.status = entry.status end
-			if workspace.view == "refs" then workspace.branches = entry.branches end
-		end
-		if workspace.open and workspace.view == "files" then
-			workspace.files, workspace.filesMore = fileTree(workspace.root)
+		local host = hosts[sessionHost[session.id] or 0]
+		workspace.host = host and host.id
+		-- A remote session's folder is on another machine: local git, ls and gh would read the
+		-- wrong disk, so its Files, Changes and Refs open Tern's own panels on that host instead.
+		workspace.remote = host ~= nil and host.kind == "remote"
+		workspace.view = if workspace.remote then "agents" else (records("ws-view")[key] or "agents")
+		if not workspace.remote then
+			local entry = git[folder]
+			refreshGit(folder)
+			local groups, base = repoGroups(folder, entry, if workspace.open then workspace.view else nil)
+			workspace.root = base
+			workspace.repo = #groups > 0
+			if #groups > 0 then
+				local total, ahead, behind = 0, 0, 0
+				for _, g in groups do total, ahead, behind = total + g.count, ahead + g.ahead, behind + g.behind end
+				workspace.changeCount, workspace.ahead, workspace.behind = total, ahead, behind
+			end
+			-- Branch, ticket and PR come from the repo the folder is in, not from nested ones.
+			if entry and entry.repo and groups[1] then workspace.branch = groups[1].branch end
+			if workspace.branch then
+				workspace.pr = prFor(workspace.root, workspace.branch)
+				workspace.ticket = ticketOf(workspace.branch)
+			end
+			if #groups == 1 then
+				workspace.status, workspace.branches = groups[1].status, groups[1].branches
+			elseif #groups > 1 then
+				workspace.repos = groups
+			end
+			if workspace.open and workspace.view == "files" then
+				workspace.files, workspace.filesMore = fileTree(workspace.root)
+			end
 		end
 		local keep = true
 		if filter then
@@ -476,6 +640,26 @@ local function model(cx)
 	end
 	for _, w in iced do table.insert(active, w) end
 	workspaces = active
+	-- Each machine's workspaces sit together (in your order) under its header, even with one host.
+	local hostRows = nil
+	if #hostOrder > 0 then
+		local byHost = {}
+		for _, w in workspaces do
+			local h = w.host or -1
+			byHost[h] = byHost[h] or {}
+			table.insert(byHost[h], w)
+		end
+		workspaces, hostRows = {}, {}
+		for _, id in hostOrder do
+			local h = hosts[id]
+			table.insert(hostRows, {
+				id = id, name = h.name, state = h.state, rtt = h.rtt_ms, remote = h.kind == "remote",
+				current = h.current, error = h.detail and h.detail.error, count = #(byHost[id] or {}),
+			})
+			for _, w in (byHost[id] or {}) do table.insert(workspaces, w) end
+		end
+		for _, w in (byHost[-1] or {}) do table.insert(workspaces, w) end
+	end
 
 	-- Save the unseen marks when they change, dropping panes that no longer exist.
 	local keep, parts = {}, {}
@@ -511,7 +695,7 @@ local function model(cx)
 		pcall(tern.chrome.refresh)
 	end
 	return {
-		workspaces = workspaces, moving = moving, filter = filter,
+		workspaces = workspaces, moving = moving, filter = filter, hosts = hostRows,
 		iceCount = iceCount, showIce = showIce, sound = tern.kv.get("sound") == true,
 	}
 end
@@ -538,9 +722,10 @@ end
 
 local drawQueued = false
 function redraw()
+	checkTimers() -- unsticks a draw queued behind timers that died
 	if drawQueued then return end
 	drawQueued = true
-	tern.timer(0, function(cx)
+	later(0, function(cx)
 		drawQueued = false
 		if not cx then return end
 		local ok, err = pcall(draw, cx)
@@ -688,11 +873,11 @@ local function ensureRail(cx, tab, pane)
 	end
 	-- Several panes: rebuild in callbacks of their own (each has a 50 ms budget).
 	rebuilding[tab] = true
-	tern.timer(0, function(c)
+	later(0, function(c)
 		if not c then rebuilding[tab] = nil; return end
 		local ok, result = pcall(rebuild, c, tab, pane)
 		if not ok then report(c, result) end
-		tern.timer(0, function(c2)
+		later(0, function(c2)
 			rebuilding[tab] = nil
 			if not c2 then return end
 			pcall(function()
@@ -742,7 +927,6 @@ end
 
 -- Gives the shown tab its panel, full height and at the shared width.
 local function follow(cx, tab)
-	if not localHost(cx) then return end
 	closeOrphans(cx)
 	if not wantPanel then return end
 	tab = tab or shownTab(cx)
@@ -764,10 +948,6 @@ local function follow(cx, tab)
 end
 
 local function togglePanel(cx)
-	if not localHost(cx) then
-		cx:toast("info", "Kai", "Switch to the local host to show Workspaces.")
-		return
-	end
 	local own = ours(cx)
 	if wantPanel and next(own) ~= nil then
 		setWantPanel(false)
@@ -950,6 +1130,15 @@ local function menuAction(cx, act, node)
 		for _, s in cx.session:sessions() do table.insert(ids, s.id) end
 		setAll("open", ids, act == M.expandAll)
 
+	-- Host
+	elseif act == M.addHost then cx:command("add_remote_host")
+	elseif act == M.switchHost or act == M.newOnHost or act == M.disconnectHost then
+		local host = tonumber((node or ""):match("%.h(%d+)"))
+		if not host then return end
+		if act == M.disconnectHost then cx.hosts:disconnect(host); return end
+		if cx.hosts:current().id ~= host then cx.hosts:switch(host) end
+		if act == M.newOnHost then cx.sessions:create({}) end
+
 	-- Pane
 	elseif pane and PANE_ACTS[act] then
 		if not paneInfo then return end
@@ -1107,10 +1296,21 @@ local function viewAction(cx, act, value, label, node)
 	if act == "view" then
 		local ws, which = string.match(value or "", "^(%d+):(%a+)$")
 		if not ws then return true end
+		-- A remote workspace's files and git live on its machine: show it there in Tern's own panels.
+		if which ~= "agents" and isRemote(cx, tonumber(ws)) then
+			showSession(cx, tonumber(ws))
+			cx:command(if which == "files" then "focus_files" else "new_git_block")
+			return true
+		end
 		local views = records("ws-view")
 		views[ws] = which
 		tern.kv.set("ws-view", views)
-		if which ~= "agents" then refreshGit(sessionFolder(cx, tonumber(ws)), true) end
+		if which ~= "agents" then
+			local folder = sessionFolder(cx, tonumber(ws))
+			refreshGit(folder, true)
+			local found = nested[git[folder] and git[folder].root or folder]
+			for _, r in (found and found.repos or {}) do refreshGit(r, true) end
+		end
 		redraw()
 		return true
 	elseif act == "dir" then
@@ -1140,8 +1340,10 @@ local function viewAction(cx, act, value, label, node)
 		else return false end
 		return true
 	elseif branch and label == M.checkout then
+		-- In a monorepo the branch row sits in its repo's group, keyed by that repo's root.
+		local root = unhex((node or ""):match("%.g(%x+)%."))
 		local ws = tonumber((node or ""):match("%.w(%d+)"))
-		withRepo(cx, sessionFolder(cx, ws), function(c, repo) settle(c.git:checkout(repo, branch)) end)
+		withRepo(cx, root or sessionFolder(cx, ws), function(c, repo) settle(c.git:checkout(repo, branch)) end)
 		return true
 	end
 	return false
@@ -1165,6 +1367,12 @@ function quickAction(cx, act, value)
 			for _, p in tabPanes(cx, id) do cx.layout:close(p.pane) end
 			if byTab[id] then cx.layout:close(byTab[id]) end
 		end
+	elseif act == "addhost" then
+		cx:command("add_remote_host")
+	elseif act == "host" then
+		local id = tonumber(value)
+		if id and cx.hosts:current().id ~= id then cx.hosts:switch(id) end
+		redraw()
 	elseif act == "url" then
 		local url = unhex(value)
 		if url and url ~= "" then cx:open(url) end
@@ -1415,8 +1623,6 @@ tern.carly.export("open_workspace", {
 end)
 
 tern.carly.context(function()
-	local names = {}
-	for _, w in visibleOrder do table.insert(names, tostring(w)) end
 	return "Kai workspaces sidebar: use plugins.kai.open_workspace(name_or_path) to switch to or create a workspace."
 end)
 
@@ -1436,6 +1642,7 @@ for _, dir in { "right", "down" } do
 end
 
 local function followAndDraw(cx, tab)
+	checkTimers()
 	local ok, err = pcall(function()
 		follow(cx, tab)
 		draw(cx)
@@ -1443,7 +1650,11 @@ local function followAndDraw(cx, tab)
 	if not ok then tern.log.warn("kai: " .. tostring(err)) end
 end
 
-local function tick(cx)
+-- Each chain carries its generation, so a restarted chain never runs beside a late original.
+local tickGen = 0
+local function tick(gen, cx)
+	if gen ~= tickGen then return end
+	lastTick = tern.now()
 	if cx then
 		local ok, err = pcall(function()
 			follow(cx)
@@ -1451,7 +1662,17 @@ local function tick(cx)
 		end)
 		if not ok and problem ~= tostring(err) then report(cx, err) end
 	end
-	tern.timer(750, tick)
+	later(750, function(c) tick(gen, c) end)
+end
+
+-- Starts a fresh tick chain and drops work that was waiting on a timer that will never fire.
+function restartTick()
+	tickGen += 1
+	drawQueued = false
+	table.clear(rebuilding)
+	for _, entry in git do entry.inflight = false end
+	local gen = tickGen
+	later(0, function(c) tick(gen, c) end)
 end
 
 tern.on("window_start", function(cx) followAndDraw(cx) end)
@@ -1462,4 +1683,4 @@ end
 for _, name in { "title", "cwd", "command_started", "command_finished" } do
 	tern.on(name, function(_ev, _cx) redraw() end)
 end
-tern.timer(750, tick)
+restartTick()
