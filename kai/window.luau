@@ -465,6 +465,8 @@ local function repoGroups(folder, entry, view)
 	return groups, base
 end
 
+local SIZE_IDS = { compact = true, standard = true, spacious = true }
+
 local function model(cx)
 	local own = ours(cx)
 	local agents = {}
@@ -697,6 +699,7 @@ local function model(cx)
 	return {
 		workspaces = workspaces, moving = moving, filter = filter, hosts = hostRows,
 		iceCount = iceCount, showIce = showIce, sound = tern.kv.get("sound") == true,
+		size = if SIZE_IDS[tern.kv.get("size")] then tern.kv.get("size") else "standard",
 	}
 end
 
@@ -1122,6 +1125,9 @@ local function menuAction(cx, act, node)
 
 	-- Header
 	if act == M.newWs then newWorkspace(cx)
+	elseif act == M.sizeCompact or act == M.sizeStandard or act == M.sizeSpacious then
+		local id = if act == M.sizeCompact then "compact" elseif act == M.sizeSpacious then "spacious" else "standard"
+		tern.kv.set("size", if id == "standard" then nil else id)
 	elseif act == M.sound or act == M.noSound then
 		tern.kv.set("sound", act == M.sound or nil)
 		cx:toast("info", "Kai", if act == M.sound then "Sounds on" else "Sounds off")

@@ -41,6 +41,7 @@ Optional: PR badges need the [GitHub CLI](https://cli.github.com) (`gh`) signed 
 | Park a workspace | Right-click → Move to Ice Box. The box icon in the header shows or hides parked ones |
 | Icon and color | Right-click a workspace → Set Icon…, Set Color… |
 | Sounds | Right-click the WORKSPACES header → Turn Sounds On. Off by default; toasts always show |
+| Size | Right-click the WORKSPACES header → Compact, Standard (default) or Spacious. Text stays at Tern's UI size; spacing, rows and tiles shrink |
 | Ask Carly | "Open my atlas-api workspace", or give a folder path to create one |
 
 Right-click menus also cover rename, lock, tab colors, splits, moving panes to other tabs or workspaces, interrupting or stopping agents, Copy Path and Reveal in Finder.

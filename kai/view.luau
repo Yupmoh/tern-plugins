@@ -28,6 +28,7 @@ local M = {
 	newWs = "New Workspace…", expandAll = "Expand All Workspaces", collapseAll = "Collapse All Workspaces",
 	addHost = "Add Remote Host…", switchHost = "Switch to Host", newOnHost = "New Session on Host…",
 	disconnectHost = "Disconnect Host",
+	sizeCompact = "Compact Size", sizeStandard = "Standard Size", sizeSpacious = "Spacious Size",
 }
 View.M = M
 
@@ -110,8 +111,10 @@ end
 
 -- The move being placed (set per render), so rows can dim and drop slots can appear.
 local mv = nil
--- Path of the section workspaces sit in: the root, or their host's section when hosts are shown.
-local parent = "main.kai."
+-- The canvas path of the root list (the size wrapper "s", then the list "kai"), and the path of
+-- the section workspaces sit in: the root, or their host's section when hosts are shown.
+local ROOT = "main.s.kai."
+local parent = ROOT
 
 -- Tern's own move glyph, shown on hover; clicking it picks the row up.
 local function grip(value, what)
@@ -600,7 +603,7 @@ local function hostSection(h, body)
 	local key = "h" .. tostring(h.id)
 	if #body == 0 then table.insert(body, note("none", "No sessions")) end
 	return ui.node("section", {
-		key = key, head = "main.kai." .. key .. ".head", collapsible = true, collapsed = false,
+		key = key, head = ROOT .. key .. ".head", collapsible = true, collapsed = false,
 		role = "kai.host", actions = { menu = menu },
 	}, {
 		ui.node("row", {
@@ -618,11 +621,21 @@ local function hostSection(h, body)
 	})
 end
 
+local SIZES = { compact = M.sizeCompact, standard = M.sizeStandard, spacious = M.sizeSpacious }
+
+-- The header menu, plus the two sizes not in use.
+local function sizeMenu(model, menu)
+	for _, id in { "compact", "standard", "spacious" } do
+		if id ~= model.size then table.insert(menu, SIZES[id]) end
+	end
+	return menu
+end
+
 function View.render(model)
 	mv = model.moving
 	local children = {
 		ui.node("row", { key = "header", role = "kai.header",
-			actions = { menu = { M.newWs, M.expandAll, M.collapseAll, if model.sound then M.noSound else M.sound } } }, {
+			actions = { menu = sizeMenu(model, { M.newWs, M.expandAll, M.collapseAll, if model.sound then M.noSound else M.sound }) } }, {
 			ui.node("text", { key = "title", text = "WORKSPACES", tone = "muted", grow = 1 }),
 			ui.node("icon", { key = "filter", name = "search", tone = if model.filter then "accent" else "muted",
 				title = "Filter workspaces, tabs and panes", aria = "Filter", actions = { click = "filter" } }),
@@ -658,18 +671,21 @@ function View.render(model)
 			byHost[workspace.host] = byHost[workspace.host] or {}
 			into = byHost[workspace.host]
 		end
-		parent = if into == loose then "main.kai." else "main.kai.h" .. tostring(workspace.host) .. ".l."
+		parent = if into == loose then ROOT else ROOT .. "h" .. tostring(workspace.host) .. ".l."
 		if slotAt(src, i) then table.insert(into, dropSlot("d" .. tostring(workspace.id), workspace.id)) end
 		table.insert(into, workspaceSection(workspace))
 	end
-	parent = "main.kai."
+	parent = ROOT
 	if model.hosts then
 		for _, h in model.hosts do
 			table.insert(children, hostSection(h, byHost[h.id] or {}))
 		end
 	end
 	if slotAt(src, #model.workspaces + 1) then table.insert(children, dropSlot("dend", 0)) end
-	return ui.node("col", { key = "kai", role = "kai.root" }, children)
+	-- The size wrapper only carries a role: styles.css tightens spacing beneath kai.compact/kai.standard.
+	return ui.node("col", { key = "s", role = "kai." .. model.size }, {
+		ui.node("col", { key = "kai", role = "kai.root" }, children),
+	})
 end
 
 return View

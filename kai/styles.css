@@ -327,3 +327,38 @@ row[data-role='kai.tile'], [data-role='kai.tile'].sf-row {
   border-radius: 50%;
   background: var(--tc);
 }
+
+/* Sizes. The rules above are Spacious; Standard (the default) and Compact tighten spacing under
+   the size wrapper. Text stays at Tern's UI font size; only padding, gaps and tiles shrink. */
+[data-role='kai.standard'] [data-role='kai.root'] { gap: 12px; }
+[data-role='kai.standard'] [data-role='kai.hostBody'] { gap: 12px; }
+[data-role='kai.standard'] [data-role='kai.workspace'] { padding: 5px; }
+[data-role='kai.standard'] [data-role='kai.workspace'] .sf-section-body { gap: 6px; padding-top: 6px; }
+[data-role='kai.standard'] [data-role='kai.list'] { gap: 2px; }
+[data-role='kai.standard'] [data-role='kai.indent'] { gap: 2px; }
+[data-role='kai.standard'] [data-role='kai.row'] > .sf-item,
+[data-role='kai.standard'] [data-role='kai.rowFocused'] > .sf-item,
+[data-role='kai.standard'] [data-role='kai.fileRow'] { min-height: calc(var(--sf-lh) + 10px); padding: 3px 8px; }
+[data-role='kai.standard'] [data-role='kai.root'] .sf-section-head { min-height: calc(var(--sf-lh) + 10px); padding: 4px 8px; }
+[data-role='kai.standard'] [data-role='kai.tile'] { width: 24px; height: 24px; line-height: 24px; border-radius: 7px; }
+[data-role='kai.standard'] [data-role='kai.views'] { margin: 0 0 2px; padding: 2px; }
+[data-role='kai.standard'] [data-role='kai.view'],
+[data-role='kai.standard'] [data-role='kai.viewOn'] { height: 24px; }
+[data-role='kai.standard'] [data-role='kai.heading'] { padding: 6px 8px 1px; }
+
+[data-role='kai.compact'] [data-role='kai.root'] { gap: 6px; padding: 6px 4px; }
+[data-role='kai.compact'] [data-role='kai.hostBody'] { gap: 6px; }
+[data-role='kai.compact'] [data-role='kai.workspace'] { padding: 3px; border-radius: 10px; }
+[data-role='kai.compact'] [data-role='kai.workspace'] .sf-section-body { gap: 3px; padding-top: 3px; }
+[data-role='kai.compact'] [data-role='kai.list'] { gap: 0; }
+[data-role='kai.compact'] [data-role='kai.indent'] { gap: 0; }
+[data-role='kai.compact'] [data-role='kai.row'] > .sf-item,
+[data-role='kai.compact'] [data-role='kai.rowFocused'] > .sf-item,
+[data-role='kai.compact'] [data-role='kai.fileRow'] { min-height: calc(var(--sf-lh) + 4px); padding: 1px 6px; }
+[data-role='kai.compact'] [data-role='kai.root'] .sf-section-head { min-height: calc(var(--sf-lh) + 4px); padding: 2px 6px; }
+[data-role='kai.compact'] [data-role='kai.tile'] { width: 20px; height: 20px; line-height: 20px; border-radius: 6px; font-size: 0.85em; }
+[data-role='kai.compact'] [data-role='kai.views'] { margin: 0; padding: 1px; border-radius: 8px; }
+[data-role='kai.compact'] [data-role='kai.view'],
+[data-role='kai.compact'] [data-role='kai.viewOn'] { height: 20px; border-radius: 6px; }
+[data-role='kai.compact'] [data-role='kai.heading'] { padding: 4px 6px 0; }
+[data-role='kai.compact'] [data-role='kai.note'] { padding: 2px 6px; }
