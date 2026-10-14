@@ -27,6 +27,43 @@ local function localHost(cx)
 	return cx.hosts:current().kind == "local"
 end
 
+-- Platform. Kai keeps every path with "/" separators (Windows accepts them), so path logic is one
+-- code path; only the helper programs differ per OS. PowerShell arguments are passed as single-quoted
+-- literals with quotes doubled, never spliced raw.
+local OS = tern.runtime.os
+local WINDOWS = OS == "windows"
+local MAC = OS == "macos"
+
+local function norm(path)
+	if type(path) ~= "string" then return path end
+	return if WINDOWS then (path:gsub("\\", "/")) else path
+end
+
+local HOME = norm(tern.getenv("HOME") or tern.getenv("USERPROFILE")) or "/"
+
+local function psQuote(text)
+	return "'" .. text:gsub("'", "''") .. "'"
+end
+
+local function powershell(script)
+	return { "powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script }
+end
+
+-- Opens a folder or file in the system file manager; `select` highlights it in its folder instead.
+local function showInFiles(path, select)
+	if not path or path == "" then return end
+	local argv
+	if WINDOWS then
+		local native = path:gsub("/", "\\")
+		argv = if select then { "explorer.exe", "/select," .. native } else { "explorer.exe", native }
+	elseif MAC then
+		argv = if select then { "/usr/bin/open", "-R", path } else { "/usr/bin/open", path }
+	else
+		argv = { "xdg-open", if select then (path:match("^(.*)/[^/]+$") or path) else path }
+	end
+	pcall(tern.process.run, argv, { timeout_ms = 10000 }, function() end)
+end
+
 -- Whether a session lives on a remote host.
 local function isRemote(cx, sessionId)
 	local hostId
@@ -60,7 +97,7 @@ local function agentOf(line)
 end
 
 local function tildePath(path)
-	local home = tern.getenv("HOME")
+	local home = HOME
 	if home and path:sub(1, #home) == home then return "~" .. path:sub(#home + 1) end
 	return path
 end
@@ -140,7 +177,9 @@ end
 local function later(ms, fn)
 	checkTimers()
 	if timersDead then
-		tern.process.run({ "/bin/sleep", string.format("%.3f", ms / 1000) }, { timeout_ms = ms + 5000 },
+		local argv = if WINDOWS then powershell("Start-Sleep -Milliseconds " .. tostring(math.floor(ms)))
+			else { "/bin/sleep", string.format("%.3f", ms / 1000) }
+		tern.process.run(argv, { timeout_ms = ms + 5000 },
 			function(_result, cx) fn(cx) end)
 	else
 		tern.timer(ms, fn)
@@ -161,7 +200,7 @@ local function refreshGit(folder, force)
 					entry.inflight, entry.repo, entry.root, entry.status, entry.branches = false, false, nil, nil, nil
 					return
 				end
-				entry.repo, entry.root = true, repo.root
+				entry.repo, entry.root = true, norm(repo.root)
 				local pending = 2
 				local function done()
 					pending -= 1
@@ -191,10 +230,14 @@ local function listDir(dir)
 	if hit and (hit.pending or tern.now() - hit.at < LIST_TTL_MS) then return hit.entries end
 	local stale = hit and hit.entries
 	listing[dir] = { pending = true, entries = stale }
-	tern.process.run({ "/bin/ls", "-1Ap", dir }, { timeout_ms = 5000 }, function(result)
+	local argv = if WINDOWS then powershell(
+		"Get-ChildItem -Force -LiteralPath " .. psQuote(dir)
+			.. " | ForEach-Object { if ($_.PSIsContainer) { $_.Name + '/' } else { $_.Name } }")
+		else { "/bin/ls", "-1Ap", dir }
+	tern.process.run(argv, { timeout_ms = 5000 }, function(result)
 		local entries = {}
 		if result and result.status == 0 then
-			for line in string.gmatch(result.stdout or "", "[^\n]+") do
+			for line in string.gmatch(result.stdout or "", "[^\r\n]+") do
 				if not HIDDEN[line] then
 					local isDir = line:sub(-1) == "/"
 					table.insert(entries, { name = if isDir then line:sub(1, -2) else line, dir = isDir })
@@ -220,22 +263,34 @@ local NESTED_MAX = 30
 local PRUNE = { "node_modules", ".build", "build", "dist", "target", "Library", "Temp", "obj", ".venv", "vendor", "Pods", "DerivedData" }
 
 local function nestedRepos(folder)
-	if folder == "/" or folder == tern.getenv("HOME") then return nil end
+	if folder == "/" or folder == HOME or folder:match("^%a:/?$") then return nil end
 	local hit = nested[folder]
 	if hit and (hit.pending or tern.now() - hit.at < NESTED_TTL_MS) then return hit.repos end
 	local stale = hit and hit.repos
 	nested[folder] = { pending = true, repos = stale }
-	local argv = { "/usr/bin/find", folder, "-maxdepth", "4", "(" }
-	for i, name in PRUNE do
-		if i > 1 then table.insert(argv, "-o") end
-		table.insert(argv, "-name")
-		table.insert(argv, name)
+	local argv
+	if WINDOWS then
+		-- Depth 3 below the folder matches find's maxdepth 4; pruned folders are filtered by path.
+		local skip = {}
+		for _, name in PRUNE do table.insert(skip, psQuote("\\" .. name .. "\\")) end
+		argv = powershell("$skip = @(" .. table.concat(skip, ",") .. "); "
+			.. "Get-ChildItem -LiteralPath " .. psQuote(folder) .. " -Recurse -Depth 3 -Force -Filter .git -ErrorAction SilentlyContinue"
+			.. " | Where-Object { $p = $_.FullName; -not ($skip | Where-Object { $p.Contains($_) }) }"
+			.. " | ForEach-Object { $_.FullName }")
+	else
+		argv = { "/usr/bin/find", folder, "-maxdepth", "4", "(" }
+		for i, name in PRUNE do
+			if i > 1 then table.insert(argv, "-o") end
+			table.insert(argv, "-name")
+			table.insert(argv, name)
+		end
+		for _, arg in { ")", "-prune", "-o", "-name", ".git", "-print" } do table.insert(argv, arg) end
 	end
-	for _, arg in { ")", "-prune", "-o", "-name", ".git", "-print" } do table.insert(argv, arg) end
 	-- find exits non-zero on an unreadable folder; what it printed still holds.
 	tern.process.run(argv, { timeout_ms = 10000 }, function(result)
 		local repos = {}
-		for line in string.gmatch(result and result.stdout or "", "[^\n]+") do
+		for line in string.gmatch(result and result.stdout or "", "[^\r\n]+") do
+			line = norm(line)
 			local dir = line:match("^(.*)/%.git$")
 			if dir and dir ~= folder and #repos < NESTED_MAX then
 				table.insert(repos, dir)
@@ -251,7 +306,7 @@ local function nestedRepos(folder)
 end
 
 -- The tree under `root` from cached listings; nil while the root's first listing runs.
-local function fileTree(root)
+local function fileTree(root, marks)
 	local count = 0
 	local function walk(dir)
 		local entries = listDir(dir)
@@ -261,6 +316,7 @@ local function fileTree(root)
 			count += 1
 			if count > FILE_LIMIT then break end
 			local node = { name = e.name, path = dir .. "/" .. e.name, dir = e.dir }
+			if marks then node.change, node.dirty = marks.files[node.path], marks.dirs[node.path] end
 			if e.dir then
 				node.open = expanded[node.path] == true
 				if node.open then node.children = walk(node.path) or {} end
@@ -302,7 +358,7 @@ end
 
 -- "~/Desktop/Work/A/B" -> "A › B": the two folders that name the place.
 local function crumb(path)
-	local home = tern.getenv("HOME")
+	local home = HOME
 	if path == home then return "~" end
 	local parts = {}
 	for part in string.gmatch(path, "[^/]+") do table.insert(parts, part) end
@@ -335,17 +391,27 @@ local function notify(cx, kind, title)
 	local text = if kind == "done" then "Finished" elseif kind == "failed" then "Command failed" else "Waiting for you"
 	pcall(function() cx:toast(if kind == "failed" then "error" else "info", title, text) end)
 	if tern.kv.get("sound") == true then
-		local sound = if kind == "waiting" then "Ping" elseif kind == "failed" then "Basso" else "Glass"
-		tern.process.run({ "/usr/bin/afplay", "/System/Library/Sounds/" .. sound .. ".aiff" }, { timeout_ms = 5000 }, function() end)
+		if MAC then
+			local sound = if kind == "waiting" then "Ping" elseif kind == "failed" then "Basso" else "Glass"
+			tern.process.run({ "/usr/bin/afplay", "/System/Library/Sounds/" .. sound .. ".aiff" }, { timeout_ms = 5000 }, function() end)
+		elseif WINDOWS then
+			local sound = if kind == "waiting" then "Asterisk" elseif kind == "failed" then "Hand" else "Exclamation"
+			tern.process.run(powershell("[System.Media.SystemSounds]::" .. sound .. ".Play(); Start-Sleep -Milliseconds 900"),
+				{ timeout_ms = 5000 }, function() end)
+		end
 	end
 end
 
 -- Pull requests per repo root, from `gh` (best effort: no gh, no badge), refreshed every 2 min.
 local prs = {} -- root -> { at, inflight, byBranch }
 local PR_TTL_MS = 120000
-local CHILD_ENV = { PATH = "/opt/homebrew/bin:/usr/local/bin:" .. (tern.getenv("PATH") or "/usr/bin:/bin") }
+-- gh: Homebrew's and the usual Windows install, else the first on PATH.
+local CHILD_ENV = if WINDOWS then nil else { PATH = "/opt/homebrew/bin:/usr/local/bin:" .. (tern.getenv("PATH") or "/usr/bin:/bin") }
 local GH = (function()
-	for _, p in { "/opt/homebrew/bin/gh", "/usr/local/bin/gh" } do
+	local candidates = if WINDOWS then { "C:/Program Files/GitHub CLI/gh.exe" } else { "/opt/homebrew/bin/gh", "/usr/local/bin/gh" }
+	local sep, exe = if WINDOWS then ";" else ":", if WINDOWS then "/gh.exe" else "/gh"
+	for dir in string.gmatch(tern.getenv("PATH") or "", "[^" .. sep .. "]+") do table.insert(candidates, norm(dir) .. exe) end
+	for _, p in candidates do
 		if tern.fs.exists(p) then return p end
 	end
 	return nil
@@ -414,6 +480,32 @@ local function annotate(status, root, roots)
 		return out
 	end
 	return { staged = mark(status.staged), unstaged = mark(status.unstaged), conflicts = status.conflicts }
+end
+
+-- For the Files tree: each changed path's kind ("modified", "conflict", …) and every folder above one,
+-- across the workspace's repos (nested repo folders are not changes of their parent).
+local function changeMarks(groups)
+	local files, dirs, roots = {}, {}, {}
+	for _, g in groups do table.insert(roots, g.root) end
+	for _, g in groups do
+		local raw = git[g.root] and git[g.root].status
+		if raw then
+			local st = annotate(raw, g.root, roots)
+			for _, pair in { { st.conflicts, "conflict" }, { st.unstaged, nil }, { st.staged, nil } } do
+				for _, f in pair[1] do
+					local abs = g.root .. "/" .. f.path:gsub("/$", "")
+					files[abs] = files[abs] or pair[2] or f.unstaged or f.staged or "modified"
+					dirs[abs] = true -- an untracked folder is listed as itself
+					local d = abs:match("^(.*)/[^/]+$")
+					while d and #d > #g.root and not dirs[d] do
+						dirs[d] = true
+						d = d:match("^(.*)/[^/]+$")
+					end
+				end
+			end
+		end
+	end
+	return { files = files, dirs = dirs }
 end
 
 local function countChanges(st)
@@ -524,7 +616,7 @@ local function model(cx)
 				if state == "waiting" then workspace.waiting += 1 end
 				if state == "working" then workspace.working += 1 end
 				if RANK[state] and (not best or RANK[state] > RANK[best]) then best = state end
-				if not folder and pane.cwd and pane.cwd ~= "" then folder = pane.cwd end
+				if not folder and pane.cwd and pane.cwd ~= "" then folder = norm(pane.cwd) end
 				local prev = lastState[pane.pane]
 				lastState[pane.pane] = state
 				local label = paneTitle(pane, program)
@@ -563,7 +655,7 @@ local function model(cx)
 				table.insert(workspace.tabs, tab)
 			end
 		end
-		folder = folder or (tern.getenv("HOME") or "/")
+		folder = folder or HOME
 		workspace.fullPath = folder
 		workspace.path = tildePath(folder)
 		workspace.crumb = crumb(folder)
@@ -602,7 +694,7 @@ local function model(cx)
 				workspace.repos = groups
 			end
 			if workspace.open and workspace.view == "files" then
-				workspace.files, workspace.filesMore = fileTree(workspace.root)
+				workspace.files, workspace.filesMore = fileTree(workspace.root, changeMarks(groups))
 			end
 		end
 		local keep = true
@@ -981,29 +1073,43 @@ local function reveal(cx, target)
 	if cx.session:pane(paneId) then cx.layout:focus(paneId) end
 end
 
--- macOS folder picker; the start folder is passed as an argument, never spliced into the script.
+-- Folder pickers per OS; the start folder is an argument (macOS) or a quoted literal (Windows).
 local CHOOSE_FOLDER = {
 	"on run argv",
 	'POSIX path of (choose folder with prompt "Choose a folder for the new workspace" default location (POSIX file (item 1 of argv)))',
 	"end run",
 }
+local function pickerArgv(start)
+	if WINDOWS then
+		local argv = powershell("Add-Type -AssemblyName System.Windows.Forms; "
+			.. "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
+			.. "$d.Description = 'Choose a folder for the new workspace'; "
+			.. "$d.SelectedPath = " .. psQuote((start:gsub("/", "\\"))) .. "; "
+			.. "if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath } else { exit 1 }")
+		table.insert(argv, 2, "-STA")
+		return argv
+	elseif MAC then
+		local argv = { "/usr/bin/osascript" }
+		for _, line in CHOOSE_FOLDER do
+			table.insert(argv, "-e")
+			table.insert(argv, line)
+		end
+		table.insert(argv, start)
+		return argv
+	end
+	return { "zenity", "--file-selection", "--directory", "--title=Choose a folder for the new workspace", "--filename=" .. start .. "/" }
+end
 local picking = false
 local function newWorkspace(cx)
 	if not localHost(cx) then return end
 	if picking then return end
 	picking = true
-	local argv = { "/usr/bin/osascript" }
-	for _, line in CHOOSE_FOLDER do
-		table.insert(argv, "-e")
-		table.insert(argv, line)
-	end
 	local start = tern.kv.get("picker-start")
-	if type(start) ~= "string" or not tern.fs.exists(start) then start = tern.getenv("HOME") or "/" end
-	table.insert(argv, start)
-	tern.process.run(argv, { timeout_ms = 30 * 60 * 1000 }, function(result, nextCx)
+	if type(start) ~= "string" or not tern.fs.exists(start) then start = HOME end
+	local ok, err = pcall(tern.process.run, pickerArgv(start), { timeout_ms = 30 * 60 * 1000 }, function(result, nextCx)
 		picking = false
 		if not nextCx or result.status ~= 0 then return end -- cancelled or timed out
-		local path = (result.stdout or ""):match("^%s*(.-)%s*$")
+		local path = norm((result.stdout or ""):match("^%s*(.-)%s*$"))
 		if #path > 1 then path = path:gsub("/+$", "") end
 		if path == "" then return end
 		tern.kv.set("picker-start", path:match("^(.*)/[^/]+$") or path)
@@ -1011,6 +1117,7 @@ local function newWorkspace(cx)
 		if not ok then report(nextCx, err) end
 		redraw()
 	end)
+	if not ok then picking = false; report(cx, err) end
 end
 
 -- Context menus. Tern reports the entry's label as the action; the target comes from the
@@ -1043,10 +1150,10 @@ local function sessionFolder(cx, id)
 	local session = sessionInfo(cx, id)
 	for _, tab in (session and session.tabs or {}) do
 		for _, pane in tabPanes(cx, tab) do
-			if pane.cwd and pane.cwd ~= "" then return pane.cwd end
+			if pane.cwd and pane.cwd ~= "" then return norm(pane.cwd) end
 		end
 	end
-	return tern.getenv("HOME") or "/"
+	return HOME
 end
 
 local function showSession(cx, id)
@@ -1082,7 +1189,7 @@ local function pickWorkspace(cx, except, fn)
 end
 
 local function openInFinder(path)
-	if path and path ~= "" then tern.process.run({ "/usr/bin/open", path }, { timeout_ms = 10000 }, function() end) end
+	showInFiles(norm(path), false)
 end
 
 -- Section folds are Tern's own local state; to set them from a menu, store the wanted
@@ -1292,7 +1399,7 @@ end
 local function withRepo(cx, path, fn)
 	cx.git:repo(path):next(function(repo, err, nextCx)
 		if not repo or not nextCx then if nextCx then report(nextCx, err or "Not a git repository") end; return end
-		fn(nextCx, repo, path:sub(#repo.root + 2))
+		fn(nextCx, repo, path:sub(#norm(repo.root) + 2))
 	end)
 end
 
@@ -1343,11 +1450,11 @@ local function viewAction(cx, act, value, label, node)
 	if file then
 		if label == M.openFile then cx:open(file)
 		elseif label == M.copyPath then cx:copy(file); cx:toast("info", "Path copied", file)
-		elseif label == M.finder then tern.process.run({ "/usr/bin/open", "-R", file }, { timeout_ms = 10000 }, function() end)
+		elseif label == M.finder then showInFiles(file, true)
 		elseif label == M.stage or label == M.unstage then
 			local dir = file:match("^(.*)/[^/]+$") or file
 			withRepo(cx, dir, function(c, repo)
-				local rel = file:sub(#repo.root + 2)
+				local rel = file:sub(#norm(repo.root) + 2)
 				settle(if label == M.stage then c.git:stage(repo, { rel }) else c.git:unstage(repo, { rel }))
 			end)
 		else return false end
@@ -1627,7 +1734,7 @@ tern.carly.export("open_workspace", {
 			return "Switched to workspace " .. session.name
 		end
 	end
-	local path = query:gsub("^~", tern.getenv("HOME") or "~")
+	local path = norm(query):gsub("^~", HOME)
 	if tern.fs.exists(path) then
 		local created = cx.sessions:create({ name = basename(path), cwd = path })
 		return "Created workspace " .. created.name

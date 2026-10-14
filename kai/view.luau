@@ -12,7 +12,8 @@ end
 -- labels are the action names window.luau dispatches on; the target comes from the node path.
 local M = {
 	switch = "Switch to Workspace", newTab = "New Tab in Workspace", renameWs = "Rename Workspace…",
-	lock = "Lock Workspace", unlock = "Unlock Workspace", copyPath = "Copy Path", finder = "Reveal in Finder",
+	lock = "Lock Workspace", unlock = "Unlock Workspace", copyPath = "Copy Path",
+	finder = if tern.runtime.os == "macos" then "Reveal in Finder" elseif tern.runtime.os == "windows" then "Show in Explorer" else "Show in Files",
 	expandTabs = "Expand All Tabs", collapseTabs = "Collapse All Tabs", collapseOthers = "Collapse Other Workspaces",
 	closeWs = "Close Workspace",
 	goTab = "Go to Tab", renameTab = "Rename Tab…", colorTab = "Set Tab Color…", newPane = "New Pane in Tab",
@@ -354,21 +355,66 @@ local function note(key, text)
 	return ui.node("text", { key = key, role = "kai.note", spans = { ui.span(text, "muted") } })
 end
 
-local function fileRows(entries, rel)
+-- File icons by type, from Tern's own icon set, each with a tone so a tree reads at a glance.
+local TYPE = {}
+for exts, look in {
+	["ts tsx js jsx mjs cjs"] = { "braces", "info" },
+	["rs"] = { "app-rust", "warning" },
+	["go"] = { "app-go", "info" },
+	["py"] = { "app-python", "info" },
+	["cs java kt swift c cc cpp h hpp m lua luau rb php zig dart scala ex exs"] = { "code", "accent" },
+	["html htm css scss sass less vue svelte astro"] = { "globe", "user" },
+	["json jsonc toml yaml yml ini xml plist conf cfg props csproj sln"] = { "gear", "warning" },
+	["md mdx txt rst adoc"] = { "doc", "success" },
+	["sh bash zsh fish ps1 psm1 bat cmd"] = { "terminal", "success" },
+	["sql db sqlite"] = { "database", "info" },
+	["png jpg jpeg gif svg webp ico bmp"] = { "sparkle", "user" },
+	["lock"] = { "lock", "muted" },
+} do
+	for ext in string.gmatch(exts, "%S+") do TYPE[ext] = look end
+end
+local NAMED = {
+	dockerfile = { "app-docker", "info" }, ["docker-compose.yml"] = { "app-docker", "info" },
+	makefile = { "wrench", "warning" }, license = { "shield", "muted" },
+}
+
+local function fileLook(name)
+	local lower = string.lower(name)
+	local hit = NAMED[lower] or TYPE[lower:match("%.([^.]+)$") or ""]
+	if hit then return hit[1], hit[2] end
+	if lower:sub(1, 1) == "." then return "gear", "muted" end
+	return "file", "muted"
+end
+
+-- Git status letters and their tones: added green, modified amber, deleted red, renamed blue.
+local LETTER = { untracked = "U", added = "A", modified = "M", deleted = "D", renamed = "R", copied = "C", typechange = "T", conflict = "!" }
+local LETTER_TONE = { U = "success", A = "success", M = "warning", D = "error", R = "info", C = "info", T = "warning", ["!"] = "error" }
+
+local function statusSpan(letter)
+	return { ui.span(letter, (LETTER_TONE[letter] or "muted") .. " strong") }
+end
+
+-- The Files tree. Changed files carry their status letter and color; folders holding changes are tinted.
+local function fileRows(entries)
 	local rows = {}
 	for _, e in entries do
 		local k = "f" .. hex(e.path)
 		if e.dir then
 			table.insert(rows, ui.node("item", {
-				key = k, label = e.name, icon = if e.open then "folder-open" else "folder", role = "kai.fileRow",
+				key = k, icon = if e.open then "folder-open" else "folder", role = "kai.fileRow",
+				label = if e.dirty then { ui.span(e.name, "warning") } else e.name,
+				value = if e.dirty then { ui.span("•", "warning") } else nil,
 				actions = { click = "dir=" .. hex(e.path), menu = { M.copyPath, M.finder } },
 			}))
 			if e.open and e.children and #e.children > 0 then
 				table.insert(rows, ui.node("col", { key = k .. "_k", role = "kai.indent" }, fileRows(e.children)))
 			end
 		else
+			local icon, tone = fileLook(e.name)
 			table.insert(rows, ui.node("item", {
-				key = k, label = e.name, icon = "file", role = "kai.fileRow",
+				key = k, icon = icon, tone = tone, role = "kai.fileRow",
+				label = if e.change then { ui.span(e.name, LETTER_TONE[LETTER[e.change] or "M"] or "warning") } else e.name,
+				value = if e.change then statusSpan(LETTER[e.change] or "M") else nil,
 				actions = { click = "file=" .. hex(e.path), menu = { M.openFile, M.copyPath, M.finder } },
 			}))
 		end
@@ -376,21 +422,20 @@ local function fileRows(entries, rel)
 	return rows
 end
 
-local LETTER = { untracked = "A", added = "A", modified = "M", deleted = "D", renamed = "R", copied = "C", typechange = "T" }
-local LETTER_TONE = { A = "success", M = "warning", D = "error", R = "info", C = "info", T = "warning" }
-
-local function changeRows(root, files, side, menu)
+local function changeRows(root, files, side, menu, conflict)
 	local rows = {}
 	for _, f in files do
-		local letter = LETTER[f[side] or ""] or "M"
+		local letter = if conflict then "!" else (LETTER[f[side] or ""] or "M")
 		local name = f.path:match("([^/]+)$") or f.path
 		local dir = f.path:match("^(.*)/[^/]+$")
+		local icon, iconTone = fileLook(name)
 		-- A submodule row is its pointer: the parent records a different commit than it had.
-		if f.submodule then dir = "submodule" end
+		if f.submodule then dir, icon, iconTone = "submodule", "folder", "info" end
+		local tone = LETTER_TONE[letter] or "warning"
 		table.insert(rows, ui.node("item", {
-			key = "f" .. hex(root .. "/" .. f.path), label = name, detail = dir,
-			icon = if f.submodule then "folder" else "file", role = "kai.fileRow",
-			value = { ui.span(letter, LETTER_TONE[letter] or "muted") },
+			key = "f" .. hex(root .. "/" .. f.path), label = { ui.span(name, tone) }, detail = dir,
+			icon = icon, tone = iconTone, role = "kai.fileRow",
+			value = statusSpan(letter),
 			title = if f.submodule then f.path .. "\nSubmodule: its checked-out commit differs from the one recorded here" else f.path,
 			actions = { click = "file=" .. hex(root .. "/" .. f.path), menu = { menu, M.openFile, M.copyPath } },
 		}))
@@ -398,20 +443,27 @@ local function changeRows(root, files, side, menu)
 	return rows
 end
 
-local function heading(key, label, n)
-	return ui.node("text", { key = key, role = "kai.heading", spans = { ui.span(string.upper(label), "muted"), ui.span("  " .. tostring(n), "muted") } })
+-- A section label; `tone` adds a colored dot so staged, unstaged and conflicts tell apart.
+local function heading(key, label, n, tone)
+	local spans = {}
+	if tone then table.insert(spans, ui.span("● ", tone)) end
+	table.insert(spans, ui.span(string.upper(label), "muted"))
+	table.insert(spans, ui.span("  " .. tostring(n), if tone and n > 0 then tone else "muted"))
+	return ui.node("text", { key = key, role = "kai.heading", spans = spans })
 end
 
--- Unstaged (conflicts first) and staged files of one repo.
+-- Conflicts, unstaged and staged files of one repo, each under its own colored label.
 local function statusBlock(root, st)
-	local unstaged = {}
-	for _, f in st.conflicts do table.insert(unstaged, f) end
-	for _, f in st.unstaged do table.insert(unstaged, f) end
-	local out = { heading("uh", "Unstaged", #unstaged) }
-	if #unstaged > 0 then
-		table.insert(out, ui.node("col", { key = "u", role = "kai.list" }, changeRows(root, unstaged, "unstaged", M.stage)))
+	local out = {}
+	if #st.conflicts > 0 then
+		table.insert(out, heading("ch", "Conflicts", #st.conflicts, "error"))
+		table.insert(out, ui.node("col", { key = "c", role = "kai.list" }, changeRows(root, st.conflicts, "unstaged", M.stage, true)))
 	end
-	table.insert(out, heading("sh", "Staged", #st.staged))
+	table.insert(out, heading("uh", "Unstaged", #st.unstaged, "warning"))
+	if #st.unstaged > 0 then
+		table.insert(out, ui.node("col", { key = "u", role = "kai.list" }, changeRows(root, st.unstaged, "unstaged", M.stage)))
+	end
+	table.insert(out, heading("sh", "Staged", #st.staged, "success"))
 	if #st.staged > 0 then
 		table.insert(out, ui.node("col", { key = "s", role = "kai.list" }, changeRows(root, st.staged, "staged", M.unstage)))
 	else
