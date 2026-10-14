@@ -1,0 +1,300 @@
+/* Kai: spacing and shading only. Every part is a native Tern element (section, item, icon,
+   badge); colors come from Tern's own variables. Plugin sheets are global, so every rule is
+   scoped to a kai role. */
+
+/* Layout and spacing */
+[data-role='kai.root'] {
+  gap: 20px;
+  padding: 8px 6px;
+}
+[data-role='kai.workspace'] .sf-section-body {
+  gap: 10px;
+  padding-top: 10px;
+}
+[data-role='kai.list'] {
+  gap: 4px;
+}
+
+/* Rows: one height everywhere (workspace heads, tab heads, panes), a faint shade on hover,
+   and a slightly darker one on the focused pane. Never an accent color. */
+[data-role='kai.row'],
+[data-role='kai.rowFocused'] {
+  align-items: center;
+  gap: 4px;
+  padding-right: 6px;
+  border-radius: 8px;
+}
+[data-role='kai.row'] > .sf-item,
+[data-role='kai.rowFocused'] > .sf-item {
+  min-height: calc(var(--sf-lh) + 20px);
+  padding: 6px 10px;
+  background: transparent;
+  box-shadow: none;
+}
+[data-role='kai.row']:hover {
+  background: color-mix(in srgb, black 14%, transparent);
+}
+[data-role='kai.rowFocused'] {
+  background: color-mix(in srgb, black 10%, transparent);
+}
+[data-role='kai.rowFocused']:hover {
+  background: color-mix(in srgb, black 14%, transparent);
+}
+[data-role='kai.root'] .sf-section-head {
+  min-height: calc(var(--sf-lh) + 20px);
+  padding: 6px 10px;
+  border-radius: 8px;
+  align-items: center;
+}
+[data-role='kai.root'] .sf-section-head:hover {
+  background: color-mix(in srgb, black 14%, transparent);
+}
+
+/* Panes inside a multi-pane tab sit one indent deeper; pull their shade back out to the same
+   left edge as every other row. The text keeps its indent through padding. */
+[data-role='kai.tab'] [data-role='kai.row'],
+[data-role='kai.tab'] [data-role='kai.rowFocused'] {
+  margin-left: -22px;
+  padding-left: 22px;
+}
+
+/* Workspace head: name and branch over a smaller path, status pills at the right edge. */
+[data-role='kai.workspace'] > .sf-section-head {
+  min-width: 0;
+}
+[data-role='kai.root'] .sf-section-head > .sf-head {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+[data-role='kai.wsHead'],
+[data-role='kai.tabHead'] {
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+[data-role='kai.wsHead'] > .sf-badge {
+  flex-shrink: 0;
+}
+[data-role='kai.wsText'] {
+  flex: 1 1 0;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden;
+}
+[data-role='kai.wsText'] .sf-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+[data-role='kai.wsText'] > .sf-text + .sf-text {
+  font-size: 0.82em;
+}
+
+/* Hover buttons (close, new tab, move), the same on every row: no width until the row is
+   hovered, then they slide in, so pills and indicators sit at the row's right edge. */
+[data-role='kai.grip'] {
+  flex-shrink: 0;
+  width: 0;
+  min-width: 0;
+  overflow: hidden;
+  margin-left: -4px;
+  opacity: 0;
+  color: var(--t3);
+  cursor: pointer;
+  transition: opacity 0.12s, width 0.12s, margin 0.12s;
+}
+[data-role='kai.row']:hover [data-role='kai.grip'],
+[data-role='kai.rowFocused']:hover [data-role='kai.grip'],
+[data-role='kai.root'] .sf-section-head:hover [data-role='kai.grip'] {
+  width: 16px;
+  margin-left: 0;
+  opacity: 1;
+}
+[data-role='kai.grip']:hover {
+  color: var(--t1);
+}
+
+/* While moving: the slots you can drop into, and the bar naming what is being moved. */
+[data-role='kai.drop'] {
+  min-height: calc(var(--sf-lh) + 12px);
+  padding: 4px 10px;
+  border: 1px dashed var(--l3);
+  border-radius: 8px;
+}
+[data-role='kai.movingBar'] {
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, black 10%, transparent);
+}
+
+/* Thin, theme-colored scrollbar (the default draws blurry). Tern's CSS has no :has(), and
+   canvases only carry the shared surface role, so this applies to every canvas pane. */
+.sf-main[data-surface='plugin.tern.canvas'] {
+  scrollbar-width: thin;
+  scrollbar-color: var(--l3) transparent;
+}
+.sf-main[data-surface='plugin.tern.canvas']::-webkit-scrollbar {
+  width: 6px;
+  background: transparent;
+}
+
+/* Workspace views: a segmented control under the path, the same faint shade as the card's
+   rows, with its content using the same row height and left edge as agent rows. */
+[data-role='kai.views'] {
+  gap: 2px;
+  margin: 2px 0 4px;
+  padding: 3px;
+  border-radius: 10px;
+  background: color-mix(in srgb, black 10%, transparent);
+}
+[data-role='kai.view'],
+[data-role='kai.viewOn'] {
+  display: flex;
+  flex: 1 1 0;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  color: var(--t3);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+[data-role='kai.view']:hover {
+  color: var(--t1);
+  background: color-mix(in srgb, black 12%, transparent);
+}
+[data-role='kai.viewOn'] {
+  color: var(--t1);
+  background: var(--l2);
+}
+[data-role='kai.fileRow'] {
+  min-height: calc(var(--sf-lh) + 20px);
+  padding: 6px 10px;
+  border-radius: 8px;
+}
+[data-role='kai.fileRow']:hover {
+  background: color-mix(in srgb, black 14%, transparent);
+}
+[data-role='kai.indent'] {
+  gap: 4px;
+  padding-left: 16px;
+}
+[data-role='kai.heading'] {
+  padding: 10px 10px 2px;
+  font-size: 0.8em;
+  letter-spacing: 0.06em;
+}
+[data-role='kai.remote'] {
+  padding: 4px 10px;
+  color: var(--t2);
+}
+[data-role='kai.note'] {
+  padding: 6px 10px;
+}
+
+/* Workspace card: a faint raised surface with a hairline, no tree rule on the left. */
+[data-role='kai.workspace'] {
+  padding: 4px;
+  border: 1px solid var(--l2);
+  border-radius: 12px;
+  background: color-mix(in srgb, black 7%, transparent);
+}
+[data-role='kai.workspace'] > .sf-section-body {
+  box-shadow: none;
+  margin-left: 0;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+
+/* Identity tile: the workspace's initial in its own color. */
+[data-role='kai.tile'] {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  line-height: 28px;
+  text-align: center;
+  border-radius: 8px;
+  font-weight: 700;
+  color: var(--tc);
+  background: color-mix(in srgb, var(--tc) 18%, transparent);
+}
+[data-role='kai.tile'] > .sf-icon {
+  margin: auto;
+}
+row[data-role='kai.tile'], [data-role='kai.tile'].sf-row {
+  align-items: center;
+  justify-content: center;
+}
+[data-role='kai.summary'] {
+  font-size: 0.82em;
+}
+
+/* Counts on the view buttons. */
+[data-role='kai.view'],
+[data-role='kai.viewOn'] {
+  gap: 4px;
+}
+[data-role='kai.viewCount'] {
+  font-size: 0.78em;
+  font-weight: 600;
+  color: var(--tc);
+}
+
+/* Waiting for you: a steady accent dot with a slow halo. */
+[data-role='kai.pulse'] {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  margin: 0 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: kai-halo 1.6s ease-out infinite;
+}
+@keyframes kai-halo {
+  from { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 60%, transparent); }
+  to { box-shadow: 0 0 0 7px color-mix(in srgb, var(--accent) 0%, transparent); }
+}
+
+[data-role='kai.wsHead'] > .sf-badge {
+  margin-left: auto;
+}
+
+/* Inside a card, every hover/focus shade keeps a gap from the card's border. */
+[data-role='kai.workspace'] {
+  padding: 7px;
+}
+[data-role='kai.workspace'] > .sf-section-head {
+  border-radius: 8px;
+}
+
+/* Header controls and the Ice Box toggle. */
+[data-role='kai.header'] {
+  align-items: center;
+  gap: 8px;
+}
+[data-role='kai.ice'],
+[data-role='kai.iceOn'] {
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  color: var(--t3);
+  font-size: 0.85em;
+  cursor: pointer;
+}
+[data-role='kai.iceOn'] {
+  color: var(--t1);
+  background: var(--l2);
+}
+/* A tab's color, as a small dot before its name. */
+[data-role='kai.colorDot'] {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--tc);
+}
