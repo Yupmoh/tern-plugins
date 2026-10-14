@@ -362,3 +362,10 @@ row[data-role='kai.tile'], [data-role='kai.tile'].sf-row {
 [data-role='kai.compact'] [data-role='kai.viewOn'] { height: 20px; border-radius: 6px; }
 [data-role='kai.compact'] [data-role='kai.heading'] { padding: 4px 6px 0; }
 [data-role='kai.compact'] [data-role='kai.note'] { padding: 2px 6px; }
+
+/* The installed version, quietly at the bottom of the list. */
+[data-role='kai.version'] {
+  padding: 4px 10px 2px;
+  font-size: 0.75em;
+  text-align: center;
+}

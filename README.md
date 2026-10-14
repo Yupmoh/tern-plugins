@@ -29,6 +29,10 @@ tern plugin install github.com/Yupmoh/tern-plugins/kai
 
 Add `--force` to update an installed copy.
 
+## Releasing
+
+`./release.sh <plugin> <X.Y.Z>` sets the version in `<plugin>/plugin.toml`, commits it and tags `<plugin>-vX.Y.Z`. Then `git push && git push --tags`.
+
 ## License
 
 [MIT](LICENSE)

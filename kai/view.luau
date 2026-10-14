@@ -587,12 +587,11 @@ local HOST_STATE = {
 }
 
 
--- A machine: a foldable section headed like the view labels (state dot, name, "This Mac" locally,
+-- A machine: a foldable section headed like the view labels (state dot, the host's own name,
 -- latency or link state, workspace count, + to add a host), holding its workspaces.
 local function hostSection(h, body)
 	local look = HOST_STATE[h.state] or HOST_STATE.connecting
-	local label = if h.remote then h.name else "This Mac"
-	local spans = { ui.span(string.upper(label), if h.current then nil else "muted") }
+	local spans = { ui.span(string.upper(h.name), if h.current then nil else "muted") }
 	if look.text then
 		table.insert(spans, ui.span(" · " .. look.text, look.tone))
 	elseif h.remote and h.rtt then
@@ -608,7 +607,7 @@ local function hostSection(h, body)
 	}, {
 		ui.node("row", {
 			key = "head", role = "kai.hostHead",
-			title = h.name .. (if h.remote then " (remote)" else " (this Mac)") .. (if h.error then "\n" .. h.error else ""),
+			title = h.name .. (if h.remote then " (remote)" else " (this machine)") .. (if h.error then "\n" .. h.error else ""),
 		}, {
 			ui.node("text", { key = "dot", spans = { ui.span("●", look.tone) }, role = "kai.hostDot" }),
 			ui.node("text", { key = "name", spans = spans, grow = 1, role = "kai.hostName",
@@ -682,6 +681,10 @@ function View.render(model)
 		end
 	end
 	if slotAt(src, #model.workspaces + 1) then table.insert(children, dropSlot("dend", 0)) end
+	if model.version then
+		table.insert(children, ui.node("text", { key = "version", role = "kai.version",
+			spans = { ui.span("Kai " .. model.version, "muted") } }))
+	end
 	-- The size wrapper only carries a role: styles.css tightens spacing beneath kai.compact/kai.standard.
 	return ui.node("col", { key = "s", role = "kai." .. model.size }, {
 		ui.node("col", { key = "kai", role = "kai.root" }, children),

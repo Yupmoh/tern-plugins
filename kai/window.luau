@@ -467,6 +467,12 @@ end
 
 local SIZE_IDS = { compact = true, standard = true, spacious = true }
 
+-- The version in plugin.toml, the one `tern plugin list` shows too (relative paths are the plugin dir).
+local VERSION = (function()
+	local ok, manifest = pcall(tern.fs.read, "plugin.toml")
+	return ok and manifest:match('\nversion%s*=%s*"([^"]+)"') or nil
+end)()
+
 local function model(cx)
 	local own = ours(cx)
 	local agents = {}
@@ -700,6 +706,7 @@ local function model(cx)
 		workspaces = workspaces, moving = moving, filter = filter, hosts = hostRows,
 		iceCount = iceCount, showIce = showIce, sound = tern.kv.get("sound") == true,
 		size = if SIZE_IDS[tern.kv.get("size")] then tern.kv.get("size") else "standard",
+		version = VERSION,
 	}
 end
 

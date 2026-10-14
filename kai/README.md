@@ -12,6 +12,8 @@ tern plugin install github.com/Yupmoh/tern-plugins/kai
 
 Update later with the same command plus `--force`. Press `⌘\` to show or hide the sidebar.
 
+The installed version shows at the bottom of the sidebar and in `tern plugin list`. Releases are tagged `kai-vX.Y.Z`.
+
 Optional: PR badges need the [GitHub CLI](https://cli.github.com) (`gh`) signed in. Linear ticket badges ask once for your workspace slug.
 
 ## What you see
@@ -57,7 +59,7 @@ Open a workspace at the root of a monorepo and Kai also finds the git repos insi
 
 ### Several hosts
 
-Workspaces sit under one foldable header per machine ("This Mac", then each remote), with a connection dot, latency and a session count. Click a host's name to switch to it, `+` opens Tern's Add remote host dialog, and right-click offers Switch, New Session on Host, Add and Disconnect. The sidebar works in remote tabs too. A remote workspace's Files, Changes and Refs buttons open Tern's own panels on that machine, since its folders aren't on this disk.
+Workspaces sit under one foldable header per machine (this one first, then each remote, by their host names), with a connection dot, latency and a session count. Click a host's name to switch to it, `+` opens Tern's Add remote host dialog, and right-click offers Switch, New Session on Host, Add and Disconnect. The sidebar works in remote tabs too. A remote workspace's Files, Changes and Refs buttons open Tern's own panels on that machine, since its folders aren't on this disk.
 
 ## How it works
 
