@@ -1626,14 +1626,51 @@ local function place(cx, target)
 	end
 end
 
+-- Gives focus back to the tab's content after a sidebar click. Tern names a tab after its focused
+-- pane, so a click that left focus on the panel would retitle the tab "Workspaces".
+local function returnFocus(cx, pane)
+	local tab = pane and cx.session:tab_of(pane)
+	local layout = tab and cx.session:layout(tab)
+	if not layout then return end
+	local own = ours(cx)
+	if not own[cx.session:focused() or -1] then return end
+	for _, p in leaves(layout.root) do
+		if not own[p] then
+			cx.layout:focus(p)
+			return
+		end
+	end
+end
+
+-- Fold state lives in Kai's store, not in each panel: a fold made in one tab shows in every tab.
+local function fold(value)
+	local kind, id = string.match(value or "", "^(%a+):(%d+)$")
+	local store = if kind == "ws" then "open" elseif kind == "tab" then "tab-open" else nil
+	if not store then return end
+	local all = records(store)
+	all[id] = all[id] == false
+	tern.kv.set(store, all)
+	bumpGen()
+end
+
 tern.on("canvas_action", function(ev, cx)
 	if ev.owner and ev.owner ~= "kai" then return nil end
 	if ev.title and ev.title ~= TITLE then return nil end
 	local act, value = ev.act, ev.value
 	if value == nil then act, value = string.match(ev.act, "^([^=]+)=?(.*)$") end
+	-- Whatever the click does, the tab keeps its content focused (and so its own title). Done now, while
+	-- the panel's tab still shows (a click that switches sessions leaves it hidden, and Tern can't focus
+	-- inside a hidden tab), and once more after Tern settles the click's own focus.
+	returnFocus(cx, ev.pane)
+	later(0, function(c) if c then returnFocus(c, ev.pane) end end)
 	-- While a row is picked up, only a drop slot or Cancel acts; anything else cancels the move.
 	if moving and act ~= "drop" and act ~= "pick" then
 		moving = nil
+		redraw()
+		return true
+	end
+	if act == "fold" then
+		fold(value)
 		redraw()
 		return true
 	end

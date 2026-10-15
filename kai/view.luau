@@ -231,7 +231,7 @@ local function tabSection(workspace, wkey, tab)
 		role = "kai.tab", mark = if moved then "drop" else nil,
 		actions = { menu = View.tabMenu(workspace, tab) },
 	}, {
-		ui.node("row", { key = "head", role = "kai.tabHead" }, (function()
+		ui.node("row", { key = "head", role = "kai.tabHead", actions = { click = "fold=tab:" .. tostring(tab.id) } }, (function()
 			local parts = {}
 			local dot = colorDot(tab.color)
 			if dot then table.insert(parts, dot) end
@@ -308,7 +308,7 @@ local function workspaceHead(workspace)
 	if workspace.iced then table.insert(children, ui.node("icon", { key = "ice", name = "box", tone = "muted", title = "In the Ice Box" })) end
 	table.insert(children, quick("newtab", "plus", "newtab=" .. tostring(workspace.id), "New tab here"))
 	table.insert(children, grip("ws:" .. tostring(workspace.id), "workspace"))
-	return ui.node("row", { key = "head", role = "kai.wsHead" }, children)
+	return ui.node("row", { key = "head", role = "kai.wsHead", actions = { click = "fold=ws:" .. tostring(workspace.id) } }, children)
 end
 
 
