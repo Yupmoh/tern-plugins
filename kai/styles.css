@@ -369,3 +369,16 @@ row[data-role='kai.tile'], [data-role='kai.tile'].sf-row {
   font-size: 0.75em;
   text-align: center;
 }
+
+/* Refs: Kai's own fold rows (Branches, Remotes, a remote, a branch folder). */
+[data-role='kai.refFold'] {
+  align-items: center;
+  gap: 6px;
+  min-height: calc(var(--sf-lh) + 10px);
+  padding: 3px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+[data-role='kai.refFold']:hover {
+  background: color-mix(in srgb, black 14%, transparent);
+}

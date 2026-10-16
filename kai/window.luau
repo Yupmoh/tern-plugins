@@ -165,12 +165,25 @@ local restartTick -- defined below
 local lastTick = tern.now()
 local timersDead = false
 
+-- A hook Tern disabled stays dead until the plugin reloads, so Kai reloads itself: once, and at most
+-- once a minute across reloads (the time is kept in the store), so a real bug can't loop.
+local function selfReload(why)
+	local last = tonumber(tern.kv.get("self-reload")) or 0
+	local now = os.time()
+	if now - last < 60 then return end
+	tern.kv.set("self-reload", now)
+	tern.log.warn("kai: " .. why .. "; reloading the plugin to bring it back")
+	local exe = if WINDOWS then "tern.exe" elseif MAC then "/Applications/Tern.app/Contents/MacOS/tern" else "tern"
+	pcall(tern.process.run, { exe, "plugin", "reload" }, { timeout_ms = 15000 }, function() end)
+end
+
 -- True when this call noticed the timers died.
 local function checkTimers()
 	if timersDead or tern.now() - lastTick < 3000 then return false end
 	timersDead = true
 	tern.log.warn("kai: Tern disabled this plugin's timers after a budget overrun; deferring through processes until reload")
 	restartTick()
+	selfReload("Tern disabled Kai's timers")
 	return true
 end
 
@@ -799,11 +812,16 @@ local function model(cx)
 		iceCount = iceCount, showIce = showIce, sound = tern.kv.get("sound") == true,
 		size = if SIZE_IDS[tern.kv.get("size")] then tern.kv.get("size") else "standard",
 		version = VERSION,
+		refOpen = records("ref-open"),
 	}
 end
 
 -- Only the panel in the shown tab is redrawn; the others go stale and catch up when their tab is
 -- shown (focus events draw), so Tern lays out one copy of the tree per change, not one per tab.
+-- A draw is two callbacks, each well inside Tern's 50 ms budget (one overrun disables the hook until
+-- reload): the model and its signature here, the view and canvas update in the next callback.
+local pendingDraw = nil -- { pane, data, signature } waiting for its second half
+
 local function draw(cx)
 	local _, byTab = ours(cx)
 	local focused = cx.session:focused()
@@ -818,8 +836,19 @@ local function draw(cx)
 	local data = model(cx)
 	local signature = tern.json.encode(data)
 	if rendered[pane] == signature then return end
-	cx.canvas:set(pane, { view = view.render(data) })
-	rendered[pane] = signature
+	local first = pendingDraw == nil
+	pendingDraw = { pane = pane, data = data, signature = signature }
+	if not first then return end -- the queued second half picks up the newest model
+	later(0, function(c)
+		local job = pendingDraw
+		pendingDraw = nil
+		if not c or not job then return end
+		local ok, err = pcall(function()
+			c.canvas:set(job.pane, { view = view.render(job.data) })
+			rendered[job.pane] = job.signature
+		end)
+		if not ok and problem ~= tostring(err) then report(c, err) end
+	end)
 end
 
 local drawQueued = false
@@ -1004,14 +1033,15 @@ end
 
 -- Opens the shown tab's panel (canvas:open lands beside the focused pane).
 local function mount(cx, tab)
-	local data = model(cx)
+	-- Opens empty; the queued redraw fills it in a callback of its own (opening, moving and sizing
+	-- already take a good part of this one's 50 ms).
 	local pane, err = cx.canvas:open({
-		title = TITLE, about = ABOUT, view = view.render(data), how = "beside", focus = false,
+		title = TITLE, about = ABOUT, view = tern.ui.text({ tern.ui.span("Loading…", "muted") }), how = "beside", focus = false,
 	})
 	if not pane then report(cx, err or "Could not open the Workspaces panel"); return nil end
-	rendered[pane] = tern.json.encode(data)
 	if cx.session:tab_of(pane) ~= tab then cx.layout:move_to_tab(pane, tab, { focus = false }) end
 	if ensureRail(cx, tab, pane) then sizeTo(cx, tab, pane, share) end
+	redraw()
 	return pane
 end
 
@@ -1644,6 +1674,14 @@ end
 
 -- Fold state lives in Kai's store, not in each panel: a fold made in one tab shows in every tab.
 local function fold(value)
+	-- Refs folds carry their key (hex) and the wanted state: ref:<hex>:<1 open|0 closed>.
+	local refKey, refWant = string.match(value or "", "^ref:(%x+):([01])$")
+	if refKey then
+		local all = records("ref-open")
+		all[unhex(refKey)] = refWant == "1"
+		tern.kv.set("ref-open", all)
+		return
+	end
 	local kind, id = string.match(value or "", "^(%a+):(%d+)$")
 	local store = if kind == "ws" then "open" elseif kind == "tab" then "tab-open" else nil
 	if not store then return end
@@ -1798,14 +1836,17 @@ for _, dir in { "right", "down" } do
 	end)
 end
 
+-- Layout work runs here; the draw is queued, so a focus or tab event never pays for a full redraw.
 local function followAndDraw(cx, tab)
 	checkTimers()
-	local ok, err = pcall(function()
-		follow(cx, tab)
-		draw(cx)
-	end)
+	local ok, err = pcall(follow, cx, tab)
 	if not ok then tern.log.warn("kai: " .. tostring(err)) end
+	redraw()
 end
+
+-- The focus hook's canary: the tab the last focus event named. If the tick sees another tab shown for
+-- several ticks and no focus event came, Tern disabled the hook (one overrun does it) and Kai reloads.
+local focusTab, focusMiss = nil, 0
 
 -- Each chain carries its generation, so a restarted chain never runs beside a late original.
 local tickGen = 0
@@ -1814,6 +1855,13 @@ local function tick(gen, cx)
 	lastTick = tern.now()
 	if cx then
 		local ok, err = pcall(function()
+			local shown = shownTab(cx)
+			if focusTab and shown and shown ~= focusTab then
+				focusMiss += 1
+				if focusMiss >= 4 then selfReload("Tern disabled Kai's focus events") end
+			else
+				focusMiss = 0
+			end
 			follow(cx)
 			redraw()
 		end)
@@ -1825,7 +1873,7 @@ end
 -- Starts a fresh tick chain and drops work that was waiting on a timer that will never fire.
 function restartTick()
 	tickGen += 1
-	drawQueued = false
+	drawQueued, pendingDraw = false, nil
 	table.clear(rebuilding)
 	for _, entry in git do entry.inflight = false end
 	local gen = tickGen
@@ -1833,7 +1881,10 @@ function restartTick()
 end
 
 tern.on("window_start", function(cx) followAndDraw(cx) end)
-tern.on("focus", function(ev, cx) followAndDraw(cx, ev.tab) end)
+tern.on("focus", function(ev, cx)
+	focusTab, focusMiss = ev.tab or shownTab(cx), 0
+	followAndDraw(cx, ev.tab)
+end)
 for _, name in { "tab_created", "tab_closed", "pane_created", "pane_closed" } do
 	tern.on(name, function(_ev, cx) followAndDraw(cx) end)
 end

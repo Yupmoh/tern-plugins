@@ -3,8 +3,10 @@ local ui = tern.ui
 local View = {}
 
 -- Paths ride in node keys hex-encoded, so window.luau can recover them from a menu's node id.
+local HEX = {}
+for i = 0, 255 do HEX[string.char(i)] = string.format("%02x", i) end
 local function hex(value)
-	return (string.gsub(value, ".", function(c) return string.format("%02x", string.byte(c)) end))
+	return (string.gsub(value, ".", HEX))
 end
 
 
@@ -390,6 +392,10 @@ end
 local LETTER = { untracked = "U", added = "A", modified = "M", deleted = "D", renamed = "R", copied = "C", typechange = "T", conflict = "!" }
 local LETTER_TONE = { U = "success", A = "success", M = "warning", D = "error", R = "info", C = "info", T = "warning", ["!"] = "error" }
 
+-- Rows per list before the rest is summarised: keeps every redraw well inside Tern's 50 ms budget.
+local REF_LIMIT = 40
+local CHANGE_LIMIT = 150
+
 local function statusSpan(letter)
 	return { ui.span(letter, (LETTER_TONE[letter] or "muted") .. " strong") }
 end
@@ -424,7 +430,11 @@ end
 
 local function changeRows(root, files, side, menu, conflict)
 	local rows = {}
-	for _, f in files do
+	for i, f in files do
+		if i > CHANGE_LIMIT then
+			table.insert(rows, note("more", tostring(#files - CHANGE_LIMIT) .. " more in Tern's Git panel"))
+			break
+		end
 		local letter = if conflict then "!" else (LETTER[f[side] or ""] or "M")
 		local name = f.path:match("([^/]+)$") or f.path
 		local dir = f.path:match("^(.*)/[^/]+$")
@@ -479,8 +489,74 @@ local function drift(ahead, behind)
 	return if #bits > 0 then table.concat(bits, " ") else nil
 end
 
--- Local branches, then remote ones under their remote, of one repo.
-local function refsBlock(branches)
+-- Refs folds, from Kai's store (set per render): fold key -> open. Shared by every tab's panel.
+local refOpen = {}
+
+-- A fold row: chevron, icon, label, count. Kai draws the chevron and leaves a folded body out, so
+-- folds are shared across tabs and a folded part costs nothing to draw.
+local function foldRow(key, label, count, open, icon, tone)
+	local spans = { ui.span(label, tone) }
+	if count then table.insert(spans, ui.span("  " .. tostring(count), "muted")) end
+	return ui.node("row", {
+		key = "x" .. hex(key), role = "kai.refFold",
+		actions = { click = "fold=ref:" .. hex(key) .. ":" .. (if open then "0" else "1") },
+	}, {
+		ui.node("icon", { key = "chev", name = if open then "chev" else "chev-r", tone = "muted" }),
+		ui.node("icon", { key = "ic", name = icon, tone = "muted" }),
+		ui.node("text", { key = "name", spans = spans, grow = 1 }),
+	})
+end
+
+-- Branches of one list as a tree on "/": folders first (folded unless they hold the current branch
+-- or you opened them), then branches. `strip` drops a remote's "origin/" prefix from the shown name.
+local function refsTree(root, scope, list, strip, row)
+	local tree = { folders = {}, names = {}, leaves = {} }
+	for _, b in list do
+		local shown = if strip then b.name:sub(#strip + 2) else b.name
+		local node = tree
+		local parts = string.split(shown, "/")
+		for i = 1, #parts - 1 do
+			local f = node.folders[parts[i]]
+			if not f then
+				f = { folders = {}, names = {}, leaves = {}, count = 0, current = false }
+				node.folders[parts[i]] = f
+				table.insert(node.names, parts[i])
+			end
+			f.count += 1
+			if b.current then f.current = true end
+			node = f
+		end
+		table.insert(node.leaves, { b = b, label = parts[#parts] })
+	end
+	local function emit(node, path, depth)
+		local rows = {}
+		table.sort(node.names)
+		for _, name in node.names do
+			local f = node.folders[name]
+			local key = root .. "|" .. scope .. "/" .. path .. name
+			local open = refOpen[key]
+			if open == nil then open = f.current end
+			table.insert(rows, foldRow(key, name, f.count, open, if open then "folder-open" else "folder"))
+			if open then
+				table.insert(rows, ui.node("col", { key = "c" .. hex(key), role = "kai.indent" }, emit(f, path .. name .. "/", depth + 1)))
+			end
+		end
+		local shown = 0
+		for _, leaf in node.leaves do
+			if shown >= REF_LIMIT then
+				table.insert(rows, note("more", tostring(#node.leaves - shown) .. " more in Tern's Git panel"))
+				break
+			end
+			table.insert(rows, row(leaf.b, leaf.label))
+			shown += 1
+		end
+		return rows
+	end
+	return emit(tree, "", 0)
+end
+
+-- Local branches, then each remote's branches, of one repo; every level folds.
+local function refsBlock(branches, root)
 	local locals, remotes = {}, {}
 	for _, b in branches do
 		if b.remote then
@@ -499,23 +575,32 @@ local function refsBlock(branches)
 			actions = { menu = if b.current then nil else { M.checkout } },
 		})
 	end
-	local out = { heading("bh", "Branches", #locals) }
-	local rows = {}
-	for _, b in locals do table.insert(rows, branchRow(b)) end
-	table.insert(out, ui.node("col", { key = "b", role = "kai.list" }, rows))
+	local function section(key, label, count, icon, body)
+		local open = refOpen[key]
+		if open == nil then open = true end
+		local out = { foldRow(key, label, count, open, icon) }
+		if open then table.insert(out, ui.node("col", { key = "c" .. hex(key), role = "kai.indent" }, body())) end
+		return out
+	end
+	local out = {}
+	for _, n in section(root .. "|L", "Branches", #locals, "branch", function()
+		return refsTree(root, "L", locals, nil, branchRow)
+	end) do table.insert(out, n) end
 	local names = {}
 	for remote in remotes do table.insert(names, remote) end
 	table.sort(names)
 	if #names > 0 then
 		local n = 0
 		for _, r in names do n += #remotes[r] end
-		table.insert(out, heading("rh", "Remotes", n))
-		for _, r in names do
-			local rrows = {}
-			for _, b in remotes[r] do table.insert(rrows, branchRow(b, b.name:sub(#r + 2))) end
-			table.insert(out, ui.node("text", { key = "r" .. hex(r), role = "kai.remote", spans = { ui.span(r) } }))
-			table.insert(out, ui.node("col", { key = "rl" .. hex(r), role = "kai.indent" }, rrows))
-		end
+		for _, node in section(root .. "|R", "Remotes", n, "globe", function()
+			local rows = {}
+			for _, r in names do
+				for _, node in section(root .. "|R/" .. r, r, #remotes[r], "cloud", function()
+					return refsTree(root, "R/" .. r, remotes[r], r, branchRow)
+				end) do table.insert(rows, node) end
+			end
+			return rows
+		end) do table.insert(out, node) end
 	end
 	return out
 end
@@ -564,7 +649,7 @@ local function reposBody(workspace, wkey)
 	for i, g in workspace.repos do
 		local d = drift(g.ahead, g.behind)
 		local value = d and ui.node("text", { key = "v", role = "kai.viewCount", tone = "info", text = d }) or nil
-		local body = if g.branches then refsBlock(g.branches) else { note("loading", "Loading…") }
+		local body = if g.branches then refsBlock(g.branches, g.root) else { note("loading", "Loading…") }
 		table.insert(out, repoSection(wkey, g, value, i > 1, body))
 	end
 	return out
@@ -586,7 +671,7 @@ local function viewBody(workspace, wkey)
 		return statusBlock(workspace.root, workspace.status)
 	end
 	if not workspace.branches then return { note("loading", "Loading…") } end
-	return refsBlock(workspace.branches)
+	return refsBlock(workspace.branches, workspace.root)
 end
 
 local function workspaceSection(workspace)
@@ -684,6 +769,7 @@ end
 
 function View.render(model)
 	mv = model.moving
+	refOpen = model.refOpen or {}
 	local children = {
 		ui.node("row", { key = "header", role = "kai.header",
 			actions = { menu = sizeMenu(model, { M.newWs, M.expandAll, M.collapseAll, if model.sound then M.noSound else M.sound }) } }, {
